@@ -1,0 +1,25 @@
+[project]
+name = "analyst-copilot"
+version = "0.1.0"
+description = "A trustworthy question-answering copilot over SEC annual/quarterly filings: precise answers with exact evidence locations, or an honest refusal."
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "duckdb>=1.0",
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
+    "streamlit>=1.35",
+    "anthropic>=0.34",
+]
+
+[project.optional-dependencies]
+xbrl = ["arelle-release>=2.20"]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
