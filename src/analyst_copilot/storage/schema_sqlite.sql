@@ -4,6 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS filings (
     filing_id       TEXT PRIMARY KEY,      -- content hash of the raw source file
+    doc_name        TEXT,                  -- source filename stem, e.g. "3M_2018_10K"
     accession       TEXT,
     company         TEXT,
     cik             TEXT,
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS blocks (
     rendered_page   INTEGER                 -- filled in only if page rendering is enabled
 );
 
+CREATE INDEX IF NOT EXISTS idx_filings_doc_name ON filings(doc_name);
 CREATE INDEX IF NOT EXISTS idx_blocks_filing ON blocks(filing_id);
 CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(filing_id, block_type);
 CREATE INDEX IF NOT EXISTS idx_blocks_table ON blocks(table_id);
@@ -55,28 +57,35 @@ CREATE TABLE IF NOT EXISTS edges (
     edge_type       TEXT NOT NULL           -- footnote_ref|cross_ref|continuation|table_narrative
 );
 
--- Lexical (BM25-style) search over narrative + table header/label text.
+-- Lexical (BM25-style) search over narrative text AND table header/label
+-- paths. row_header_path/col_header_path are indexed as their own columns
+-- (not just folded into `text`) so a specific metric label like "Capital
+-- expenditures" can be weighted far above generic boilerplate that repeats
+-- across thousands of unrelated rows in a real filing (e.g. "Amount",
+-- "Location", "Millions") — see retrieval/bm25.py's column weights.
 -- external content table keeps `blocks` as the single source of truth.
 CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
     text,
     section_path,
+    row_header_path,
+    col_header_path,
     content='blocks',
     content_rowid='rowid'
 );
 
 CREATE TRIGGER IF NOT EXISTS blocks_ai AFTER INSERT ON blocks BEGIN
-    INSERT INTO blocks_fts(rowid, text, section_path)
-    VALUES (new.rowid, new.text, new.section_path);
+    INSERT INTO blocks_fts(rowid, text, section_path, row_header_path, col_header_path)
+    VALUES (new.rowid, new.text, new.section_path, new.row_header_path, new.col_header_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS blocks_ad AFTER DELETE ON blocks BEGIN
-    INSERT INTO blocks_fts(blocks_fts, rowid, text, section_path)
-    VALUES ('delete', old.rowid, old.text, old.section_path);
+    INSERT INTO blocks_fts(blocks_fts, rowid, text, section_path, row_header_path, col_header_path)
+    VALUES ('delete', old.rowid, old.text, old.section_path, old.row_header_path, old.col_header_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS blocks_au AFTER UPDATE ON blocks BEGIN
-    INSERT INTO blocks_fts(blocks_fts, rowid, text, section_path)
-    VALUES ('delete', old.rowid, old.text, old.section_path);
-    INSERT INTO blocks_fts(rowid, text, section_path)
-    VALUES (new.rowid, new.text, new.section_path);
+    INSERT INTO blocks_fts(blocks_fts, rowid, text, section_path, row_header_path, col_header_path)
+    VALUES ('delete', old.rowid, old.text, old.section_path, old.row_header_path, old.col_header_path);
+    INSERT INTO blocks_fts(rowid, text, section_path, row_header_path, col_header_path)
+    VALUES (new.rowid, new.text, new.section_path, new.row_header_path, new.col_header_path);
 END;

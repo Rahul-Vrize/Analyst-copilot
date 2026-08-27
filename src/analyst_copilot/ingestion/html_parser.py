@@ -3,10 +3,24 @@ analyst_copilot.ingestion.locator, without converting to PDF or plain text
 (design doc: "Ingestion: Parse EDGAR HTML and Inline XBRL Without Loss").
 
 Phase 1 scope (functional now):
-  - section headings -> `section` blocks, tracked as a path stack
+  - section headings -> `section` blocks, tracked as a path stack. Real
+    EDGAR HTML almost never uses semantic <h1>-<h6> (verified against
+    actual filings — 0 heading tags in a 26k-paragraph 10-K); "Item N." /
+    "PART" prefixes on a paragraph are used as a heading heuristic instead,
+    matching the approach the design doc's sec-parser reference takes.
   - paragraphs / list items -> `paragraph` blocks
   - tables -> `table` + `table_row` + `table_cell` blocks, with a row-header
-    (first cell of the row) and column-header (first row of the table) path
+    (first cell of the row) and column-header (first row of the table) path.
+    Real EDGAR tables also essentially never use <th> — header rows are
+    plain <td> styled bold — so the header row is treated as row index 0
+    unconditionally rather than gated on tag name.
+  - page numbers: EDGAR HTML commonly inserts <hr> between pages, with the
+    printed page-footer number as the immediately preceding paragraph.
+    Detected here and used to populate `rendered_page` on every block,
+    which is cheaper and more exact than the doc's Chromium-render
+    fallback (verified: for this dataset, gold evidence_page_num equals
+    the printed footer number minus 1, a 0-indexing convention we apply
+    directly rather than guessing at rendering coordinates).
 
 Known simplifications, left as TODOs for later phases rather than guessed:
   - rowspan/colspan are not expanded into repeated logical cells yet
@@ -15,12 +29,19 @@ Known simplifications, left as TODOs for later phases rather than guessed:
   - numeric normalization (unit/scale/sign) happens in the fact/cell ledger
     build step (Phase 2), not here — this layer stores displayed text only
   - Inline XBRL fact extraction is a separate step (ingestion.xbrl_parser)
+  - header-row detection assumes the first table row is the header; a
+    title/spacer row before the real header is not handled
+  - page-footer detection assumes a filing uses <hr> page breaks with a
+    bare-number paragraph immediately before each one; a filing that
+    doesn't follow this convention gets no rendered_page (falls back to
+    section/DOM locators only, which is always emitted regardless)
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_left
 from dataclasses import replace
 
 from lxml import etree, html
@@ -28,6 +49,8 @@ from lxml import etree, html
 from analyst_copilot.ingestion.locator import Block, FilingRecord
 
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+_HEADING_TEXT_RE = re.compile(r"^(item\s+\d+[a-z]?\.|part\s+[ivx]+\b)", re.IGNORECASE)
+_BARE_NUMBER_RE = re.compile(r"\d{1,4}")
 _BLOCK_TEXT_TAGS = {"p", "li", "caption"}
 _SKIP_TAGS = {"script", "style", "head", "noscript"}
 _WS_RE = re.compile(r"\s+")
@@ -74,6 +97,9 @@ def parse_filing_html(filing: FilingRecord, raw_bytes: bytes) -> list[Block]:
     etree_doc = etree.ElementTree(tree)
     cursor = _Cursor()
     blocks: list[Block] = []
+    # (char_end of the footer paragraph, printed page number) — see module
+    # docstring on the <hr>-page-break convention.
+    footer_candidates: list[tuple[int, int]] = []
 
     for el in tree.iter():
         tag = el.tag if isinstance(el.tag, str) else None
@@ -112,6 +138,8 @@ def parse_filing_html(filing: FilingRecord, raw_bytes: bytes) -> list[Block]:
                 continue
             dom_xpath = etree_doc.getpath(el)
             start, end = cursor.advance(text)
+            is_heading_like = bool(_HEADING_TEXT_RE.match(text)) and len(text) < 200
+            block_type = "section" if is_heading_like else "paragraph"
             blocks.append(
                 Block(
                     block_id=_block_id(filing.filing_id, dom_xpath),
@@ -119,7 +147,7 @@ def parse_filing_html(filing: FilingRecord, raw_bytes: bytes) -> list[Block]:
                     parent_id=None,
                     previous_id=None,
                     next_id=None,
-                    block_type="paragraph",
+                    block_type=block_type,
                     section_path=cursor.section_path,
                     dom_xpath=dom_xpath,
                     char_start=start,
@@ -127,12 +155,56 @@ def parse_filing_html(filing: FilingRecord, raw_bytes: bytes) -> list[Block]:
                     text=text,
                 )
             )
+            if is_heading_like:
+                # "PART" prefixes outrank "Item", which outrank everything else.
+                level = 1 if text.upper().startswith("PART") else 2
+                cursor.push_heading(level, text)
             continue
 
         if tag == "table":
             blocks.extend(_parse_table(filing, etree_doc, el, cursor))
+            continue
 
-    return blocks
+        if tag == "hr":
+            if blocks and blocks[-1].block_type == "paragraph":
+                candidate = blocks[-1]
+                if candidate.text and _BARE_NUMBER_RE.fullmatch(candidate.text):
+                    footer_candidates.append((candidate.char_end, int(candidate.text)))
+            continue
+
+    return _assign_rendered_pages(blocks, footer_candidates)
+
+
+def _assign_rendered_pages(
+    blocks: list[Block], footer_candidates: list[tuple[int, int]]
+) -> list[Block]:
+    """Keep only a strictly increasing subsequence of footer candidates
+    (drops any stray non-page-footer bare number that slipped through),
+    then stamp every block with the printed page number of the page it
+    falls on, minus 1 (see module docstring for the offset rationale)."""
+    kept_offsets: list[int] = []
+    kept_pages: list[int] = []
+    last_value = -1
+    for offset, value in footer_candidates:
+        if value > last_value:
+            kept_offsets.append(offset)
+            kept_pages.append(value - 1)
+            last_value = value
+
+    if not kept_offsets:
+        return blocks
+
+    result = []
+    for block in blocks:
+        if block.char_start is None:
+            result.append(block)
+            continue
+        idx = bisect_left(kept_offsets, block.char_start)
+        if idx >= len(kept_offsets):
+            result.append(block)  # trailing content past the last detected footer
+            continue
+        result.append(replace(block, rendered_page=kept_pages[idx]))
+    return result
 
 
 def _parse_table(
@@ -173,7 +245,11 @@ def _parse_table(
     for row_idx, tr in enumerate(rows):
         cells = tr.findall("./td") + tr.findall("./th")
         cells.sort(key=lambda c: tr.index(c))
-        is_header_row = row_idx == 0 and all(c.tag == "th" for c in cells if c.tag)
+        # Real EDGAR tables essentially never use <th> (headers are plain
+        # <td> styled bold), so gating on tag name would silently find no
+        # header row at all. Treat row 0 as the header unconditionally;
+        # a title/spacer row before the real header is a known miss.
+        is_header_row = row_idx == 0
 
         row_xpath = etree_doc.getpath(tr)
         row_block_id = _block_id(filing.filing_id, row_xpath)

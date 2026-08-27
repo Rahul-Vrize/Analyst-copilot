@@ -34,7 +34,7 @@ init_db()
 
 @st.cache_resource
 def _llm_client() -> LLMClient | None:
-    if not settings.anthropic_api_key:
+    if not settings.llm_configured:
         return None
     return LLMClient()
 

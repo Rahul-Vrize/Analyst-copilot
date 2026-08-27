@@ -15,6 +15,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class FilingRecord:
     filing_id: str  # sha256 content hash of the raw source file
+    doc_name: str | None  # source filename stem, e.g. "3M_2018_10K" — used to
+    # resolve FinanceBench-style practice questions (which key off doc_name,
+    # not our content hash) back to a filing_id.
     accession: str | None
     company: str | None
     cik: str | None

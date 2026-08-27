@@ -37,6 +37,7 @@ def _fetch_bytes(path_or_url: str) -> bytes:
 def load_filing(
     path_or_url: str,
     *,
+    doc_name: str | None = None,
     company: str | None = None,
     cik: str | None = None,
     form_type: str | None = None,
@@ -55,9 +56,12 @@ def load_filing(
         raw_path.write_bytes(raw_bytes)
 
     source_url = path_or_url if path_or_url.startswith(("http://", "https://")) else None
+    if doc_name is None and source_url is None:
+        doc_name = Path(path_or_url).stem
 
     record = FilingRecord(
         filing_id=filing_id,
+        doc_name=doc_name,
         accession=accession,
         company=company,
         cik=cik,

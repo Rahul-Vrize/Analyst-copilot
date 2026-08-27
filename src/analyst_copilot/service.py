@@ -97,7 +97,9 @@ def answer_question(
                     "You are a financial filing analyst assistant. Never use outside "
                     "knowledge. Never state a number not present in the supplied passage."
                 ),
-                max_tokens=256,
+                # Reasoning-model providers (e.g. Bedrock's gpt-oss) spend part of this
+                # budget on a hidden reasoning block before the visible answer text.
+                max_tokens=1024,
             )
         except Exception:  # noqa: BLE001 - LLM synthesis is best-effort; fall back to raw evidence
             answer_text = evidence_text

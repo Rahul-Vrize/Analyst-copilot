@@ -76,13 +76,15 @@ cp .env.example .env        # then set ANTHROPIC_API_KEY (optional — the
 Place the contest data under `data/`:
 
 ```
-data/filings/               # the 78 filings from analyst-copilot-data.zip
-data/practice/practice-questions.jsonl
+data/filings/                    # the 78 filings from analyst-copilot-data.zip
+data/practice-questions.jsonl
 ```
 
-`evaluation/run_eval.py` guesses at the JSONL field names since the real
-file wasn't available when this was scaffolded — inspect one record and
-adjust `_load_questions` if the field names differ.
+`practice-questions.jsonl` is FinanceBench format: each record has
+`doc_name` (matches a filing's filename stem), `question`, `answer`, and an
+`evidence` list with `evidence_page_num` (the filing's own printed page
+footer number, 0-indexed — see `ingestion/html_parser.py`'s page-mapping
+docstring for how that's reproduced from the raw HTML).
 
 ## Running
 
@@ -117,10 +119,11 @@ Run tests:
 pytest
 ```
 
-Score against the practice set once real filings/questions are in place:
+Score against the practice set (ingest the filings referenced by
+`doc_name` first, or the script skips unmatched questions and tells you):
 
 ```bash
-python evaluation/run_eval.py data/practice/practice-questions.jsonl
+python evaluation/run_eval.py data/practice-questions.jsonl
 ```
 
 ## Project layout

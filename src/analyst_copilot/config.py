@@ -22,6 +22,12 @@ class Settings:
             os.environ.get("ANALYST_COPILOT_DATA_DIR", PROJECT_ROOT / "data")
         )
     )
+    # "anthropic" (direct Anthropic API) or "bedrock" (AWS Bedrock Converse
+    # API — works across model families, e.g. Claude, or the OpenAI OSS
+    # model this project is currently configured with).
+    llm_provider: str = field(
+        default_factory=lambda: os.environ.get("LLM_PROVIDER", "anthropic")
+    )
     llm_model: str = field(
         default_factory=lambda: os.environ.get(
             "ANALYST_COPILOT_LLM_MODEL", "claude-sonnet-5"
@@ -30,6 +36,14 @@ class Settings:
     anthropic_api_key: str | None = field(
         default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY")
     )
+    aws_region: str | None = field(default_factory=lambda: os.environ.get("AWS_REGION"))
+    bedrock_model: str | None = field(default_factory=lambda: os.environ.get("BEDROCK_MODEL"))
+
+    @property
+    def llm_configured(self) -> bool:
+        if self.llm_provider == "bedrock":
+            return bool(self.bedrock_model and self.aws_region)
+        return bool(self.anthropic_api_key)
 
     @property
     def raw_dir(self) -> Path:

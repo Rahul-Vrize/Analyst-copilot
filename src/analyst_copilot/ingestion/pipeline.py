@@ -16,6 +16,7 @@ from analyst_copilot.storage.db import get_sqlite_conn, init_db
 def ingest_filing(
     path_or_url: str,
     *,
+    doc_name: str | None = None,
     company: str | None = None,
     cik: str | None = None,
     form_type: str | None = None,
@@ -31,6 +32,7 @@ def ingest_filing(
 
     record, raw_bytes = load_filing(
         path_or_url,
+        doc_name=doc_name,
         company=company,
         cik=cik,
         form_type=form_type,
