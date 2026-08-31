@@ -1,0 +1,11 @@
+These are raw headings extracted from an SEC filing. The HTML splits words across
+tags, so titles arrive corrupted ("ITEM 1. B USINESS", "RIS K FACTORS").
+
+For each heading return:
+  clean_title : corrected, verbatim meaning preserved
+  summary     : ONE line, what a reader finds there
+  kind        : part|item|note|statement|mdna|exhibit|other
+
+DROP entries that are table-of-contents links rather than real section starts
+(they cluster on one early page and repeat the same page number).
+Never invent a section that is not in the input.

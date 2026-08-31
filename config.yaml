@@ -1,0 +1,138 @@
+# The Analyst Copilot — all tunables in one place.
+# Secrets and connection strings live in .env, never here.
+# Source of truth: IMPLEMENTATION_PLAN.md §20.6
+
+profile: prod            # dev == prod (D15) — so abstention thresholds need no
+                         # re-calibration between development and submission.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODELS — per-stage binding (D15). Deployment names come from .env.
+# Extraction is 78% of all input tokens, so the cheap model earns its keep there.
+# Verification is only 9%, and a DIFFERENT FAMILY at the generate→verify seam is
+# what preserves D4 independence. Never point verifier_b at the extractor's model:
+# that is self-verification, not verification.
+# ─────────────────────────────────────────────────────────────────────────────
+# reasoning_effort / verbosity / max_completion_tokens per stage — see §23.4.
+# ⚠️ gpt-5-mini is a REASONING model: it spends completion tokens on hidden
+# reasoning BEFORE emitting content. A budget sized for the visible answer alone
+# returns content='' with finish_reason='length' AND NO ERROR. Measured: 64
+# reasoning tokens on a trivial prompt. Always leave headroom.
+# Context window is 400K, so assembly size is not a constraint.
+models:
+  router:         {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: low,     verbosity: low, max_completion_tokens: 1000}
+  planner:        {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  query_rewrite:  {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: low,     verbosity: low, max_completion_tokens: 1000}
+  section_titles: {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: low,     verbosity: low, max_completion_tokens: 8000}
+  summarizer:     {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: minimal, verbosity: low, max_completion_tokens: 1000}
+  extractor:      {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 8000}
+  # The ANSWER stage. 62% of gold answers are non-numeric, so a bare figure is
+  # the wrong shape for most questions; this stage writes the answer from the
+  # quotes alone. Higher reasoning than extraction because choosing WHAT answers
+  # the question is the judgement, not finding the figures.
+  composer:       {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  formula_pick:   {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  verifier_a:     {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  verifier_b:     {provider_env: VERIFIER_B_PROVIDER, deployment_env: VERIFIER_B_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  # EVAL ONLY - grades free-text answers against gold. 62% of gold answers are
+  # non-numeric, so without this the harness scores them all wrong. Never used
+  # by the pipeline: the judge grades, it does not help the system answer.
+  judge:          {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+  embeddings:    {provider: azure_openai, deployment_env: EMBEDDING_DEPLOYMENT,
+                  dimensions: 1024}   # MUST equal EMBEDDING_DIMENSIONS and pages.embedding vector(1024)
+  reranker:      {provider: cohere_foundry, endpoint_env: COHERE_RERANK_ENDPOINT,
+                  model: Cohere-rerank-v4.0-pro}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUTING (§14.4, §22.2)   measured: top-1 94.1% / top-2 97.1% / top-4 98.5%
+# ─────────────────────────────────────────────────────────────────────────────
+routing:
+  top_k_filings: 4              # D11 — be generous here, strict at verification
+  clarify_when_no_company: true # 2/136 questions name no company
+  reroute_max: 1                # confirmation gate, exactly one retry
+  fallback_next_4: false        # Decision E: escalate by DEPTH, not breadth.
+                                # top-4 and top-8 both hit 134/136 — more filings
+                                # adds nothing. Kept for unseen uploads only.
+  prefer_coverage_years: true   # once populated, supersedes Rule A's heuristic
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RETRIEVAL (§4, §20.1)
+# ─────────────────────────────────────────────────────────────────────────────
+retrieval:
+  bm25_top_k: 20                # tier 1 — measured 85.7% recall with anchors
+  bm25_top_k_escalated: 40      # tier 2 — measured 84.1% assembled at router top-4
+  dense_top_k: 20
+  rrf_k: 60                     # score(d) = Σ 1/(60 + rank)
+  rerank_top_n: 15
+  assembly_token_budget: 42000  # gpt-5-mini context = 400K, so ~10x headroom.
+                                # Raise only if eval shows recall-bound failures.
+  neighbour_expand: 1           # ±1 page in tier 1, ±2 when escalated
+  use_reranker: true            # ablation flag — false isolates the reranker's lift
+  use_dense: true               # ablation flag — anchors+BM25 alone measured 85.7%
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFICATION (§20.2) — deterministic gates first, then two independent verifiers
+# ─────────────────────────────────────────────────────────────────────────────
+verification:
+  # G1b is deterministic proof that the reported figure appears IN its quote.
+  # G1 proves the quote is on the page; G1b proves the quote carries the number.
+  # Measured: without it, a label-only quote passed every gate and was then
+  # rejected by both LLM verifiers, costing a full escalation round.
+  enabled_gates: [G1, G1b, G2, G3, G4, G5, G6, G7]
+  require_all_gates: true       # any failure ⇒ abstain. These are DETERMINISTIC
+                                # and family-independent — they do most of the work.
+  verifier_policy: unanimous    # both must return VALID
+
+  # ── VERIFIER INDEPENDENCE ────────────────────────────────────────────────
+  # D4 wanted two model FAMILIES at the generate→verify seam. We currently have
+  # quota for gpt-5-mini ONLY, so A and B are the same model and independence
+  # comes from ADVERSARIAL FRAMING plus context isolation, not from architecture.
+  #
+  # The code path is family-agnostic (see IMPLEMENTATION_PLAN §22.7): switching to
+  # a real second family is a .env change, no code change.
+  #   VERIFIER_B_PROVIDER=anthropic_foundry
+  #   VERIFIER_B_DEPLOYMENT=claude-haiku-4-5
+  #
+  # ⚠️ When B is a genuine second family, set adversarial: false — refutation
+  # framing is a SUBSTITUTE for independence, not an addition to it. Running both
+  # over-abstains. Re-calibrate thresholds after any such switch.
+  independence: same_model_adversarial   # same_model_adversarial | different_model | different_family
+  verifier_b_adversarial: true           # B is told to REFUTE, never to confirm.
+                                         # It never sees A's verdict, the extractor's
+                                         # reasoning, or anything but question+answer+quotes.
+  abstain_string: "Not found in this filing."   # NEVER paraphrase this
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INGEST (§21.1)
+# ─────────────────────────────────────────────────────────────────────────────
+ingest:
+  llm_title_cleanup: true       # mandatory, but flagged. Fixes 'ITEM 1. B USINESS'
+  page_summaries: true          # ~$15 one-off for all 8,600 pages
+  min_page_chars: 40            # page-splitter fragment merge threshold — a seam is
+                                # often marked by BOTH <hr> AND page-break CSS
+  table_min_rows: 3             # data-table gate; 46% of <table> are layout artifacts
+  table_min_numeric_cells: 2
+  xbrl: true                    # first-class fact path (D8 revised)
+  xbrl_exclude_dimensional: true# segment/geography facts excluded by default
+  max_concurrency: 16           # summarisation + embedding batching
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EVAL (§20.3) — four answer shapes, four predicates, reported separately
+# ─────────────────────────────────────────────────────────────────────────────
+eval:
+  numeric_tolerance: 0.005      # ±0.5% relative
+  location_containment: 0.6     # cited page text vs gold evidence_text
+  page_seq_slack: 1             # derived page within ±1 of mapped gold page
+  gold_map_min_jaccard: 0.35    # 126/136 questions map at this threshold
+  split_by: company             # NEVER by question — boilerplate would leak
+  report_by_answer_shape: true  # 52 numeric / 35 yes-no / 26 phrase / 23 multi-sentence

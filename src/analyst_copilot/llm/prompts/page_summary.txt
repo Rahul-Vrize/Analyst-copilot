@@ -1,0 +1,8 @@
+Summarise this page of an SEC filing for a RETRIEVAL INDEX. It is never shown to a user.
+
+HARD CONSTRAINTS:
+ - Preserve every financial line-item label VERBATIM
+   ("Purchases of property, plant and equipment" -- never paraphrase to "capex").
+ - Preserve statement titles, note numbers, and period labels verbatim.
+ - Do NOT reproduce or invent figures; describe what the page contains.
+ - 3-5 sentences.

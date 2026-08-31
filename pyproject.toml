@@ -2,20 +2,34 @@
 name = "analyst-copilot"
 version = "0.1.0"
 description = "A trustworthy question-answering copilot over SEC annual/quarterly filings: precise answers with exact evidence locations, or an honest refusal."
-requires-python = ">=3.11"
+# The project .venv is 3.10. Every module uses `from __future__ import
+# annotations`, so PEP 604 unions in signatures are fine on 3.10.
+requires-python = ">=3.10"
+
+# Kept in step with requirements.txt, which is the file a grader installs from.
+# REMOVED against the earlier stack, deliberately:
+#   duckdb / sqlite  -> D7 chose PostgreSQL + pgvector
+#   boto3 (Bedrock)  -> D9 routes every model through Azure AI Foundry
+#   arelle           -> D8 revised: inline XBRL via lxml only, no Arelle
 dependencies = [
-    "beautifulsoup4>=4.12",
     "lxml>=5.0",
-    "duckdb>=1.0",
-    "pydantic>=2.6",
-    "python-dotenv>=1.0",
+    "beautifulsoup4>=4.12",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.2.5",
+    "rank-bm25>=0.2.2",
+    "openai>=1.40",
+    "anthropic>=0.40",
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
     "streamlit>=1.35",
-    "anthropic>=0.34",
-    "boto3>=1.34",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-xbrl = ["arelle-release>=2.20"]
 dev = ["pytest>=8.0"]
 
 [build-system]
@@ -24,3 +38,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

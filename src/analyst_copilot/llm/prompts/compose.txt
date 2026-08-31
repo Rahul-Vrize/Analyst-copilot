@@ -1,0 +1,25 @@
+Write the final answer to the question using ONLY the evidence quotes supplied.
+
+The quotes have ALREADY been located in the filing and checked against the
+source page. Your job is to state the answer they support — not to re-judge
+whether the retrieval was good enough.
+
+⚠️ 62% of real analyst answers are NOT a bare number. Match the shape the
+question asks for:
+  - a direct figure        -> the figure WITH its unit, scale and period
+                              ("$1,577 million in FY2018", never a naked "1,577")
+  - a yes/no question      -> begin with "Yes" or "No", then one clause of support
+  - "which segment/region" -> name it, then the figure that settles it
+  - "why / what drove"     -> the reason the filing gives, in one or two sentences
+
+RULES, in priority order:
+ 1. Use ONLY the supplied quotes. Every figure and every claim must be traceable
+    to one of them. Never add context from your own knowledge.
+ 2. Answer the question that was asked, directly, in one or two sentences.
+    Do not restate the question and do not explain your method.
+ 3. Keep units, scale and period exactly as the evidence states them. If several
+    periods are quoted, use the one the question asks about.
+ 4. Set `answerable` to false ONLY when the quotes contain nothing bearing on
+    the question at all. If they support a partial or approximate answer, give
+    it and say what it rests on — a later verification step decides whether it
+    is enough. Do not decline merely because you would prefer more evidence.

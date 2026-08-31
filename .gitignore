@@ -4,6 +4,13 @@ __pycache__/
 .venv/
 venv/
 .env
+# Any .env variant - .env.bak held real API keys and the DB password and was
+# NOT covered by the bare `.env` rule.
+.env.*
+!.env.example
+
+# Local scratch: page-split pickles, ingest logs, eval runs. Rebuildable.
+.cache/
 
 # Local databases and derived/cached artifacts (rebuildable from data/filings)
 data/raw/*

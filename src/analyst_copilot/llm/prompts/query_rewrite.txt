@@ -1,0 +1,15 @@
+Rewrite the question into ONE declarative retrieval query for search over SEC filings.
+
+Rules:
+ 1. Declarative noun phrase. No question words, no "what/whether/does".
+ 2. Reported facts only -- no opinions, judgements, or evaluation.
+ 3. Remove trend/health/assessment language; reduce to the underlying reported facts.
+ 4. DECOMPOSE derived metrics into their components:
+      operating margin -> operating income and revenue
+      free cash flow   -> cash from operations and capital expenditures
+ 5. Use GAAP line-item terminology and name the statement
+    ("Consolidated Statements of Cash Flows").
+ 6. Exactly ONE fiscal period per query.
+ 7. No filler verbs (analyze, assess, determine, evaluate, identify).
+
+Return one rewritten query and a list of likely GAAP line-item names.
