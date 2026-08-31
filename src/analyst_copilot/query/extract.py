@@ -102,15 +102,34 @@ def extract_evidence(
     context: str,
     *,
     stage: str = "extractor",
+    required_operands: list[str] | None = None,
 ) -> Extraction:
     """Run the extractor over the assembled context.
 
     `context` is built from page `raw_text` only - never a summary - so that
     every quote the model can copy is one gate G1 will accept.
+
+    `required_operands` names the slots the calculator will look up BY EXACT
+    NAME. ⚠️ Without it the extractor names slots freely, `evaluate` raises
+    "operand 'revenue' is not available", gate G4 fires, and a fully-evidenced
+    ratio question abstains as though the filing lacked the numbers. That
+    silently disabled every derived answer in the system.
     """
     prompt_name, schema = schemas.BY_STAGE[stage]
+    naming = ""
+    if required_operands:
+        naming = (
+            "\n\nSLOT NAMES - USE THESE EXACTLY:\n"
+            + "\n".join(f"  - {name}" for name in required_operands)
+            + "\nThe calculator looks these up by exact name, so a slot named "
+            "anything else is discarded and the question is refused.\n"
+            "A name ending in `__prev` is the SAME line item for the PRIOR "
+            "period; return it as its own slot, with its own quote.\n"
+            "If one of these is genuinely absent from the pages, put its name "
+            "in `missing_slots` rather than substituting a different item."
+        )
     user = (
-        f"QUESTION:\n{question}\n\n"
+        f"QUESTION:\n{question}{naming}\n\n"
         f"PAGES (the only text you may quote):\n{context}"
     )
     response = provider.complete(

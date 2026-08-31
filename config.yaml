@@ -18,6 +18,14 @@ profile: prod            # dev == prod (D15) — so abstention thresholds need n
 # returns content='' with finish_reason='length' AND NO ERROR. Measured: 64
 # reasoning tokens on a trivial prompt. Always leave headroom.
 # Context window is 400K, so assembly size is not a constraint.
+#
+# ⚠️ THE REASONING STAGES RUN AT 4000, NOT 2000, AND THAT IS A MEASURED NUMBER.
+# ✅ MEASURED on the Amazon DPO question: verifier_b returned content='' with
+# finish_reason='length' and reasoning_tokens=2000 — it spent its ENTIRE budget
+# on hidden reasoning and never emitted a verdict. `_one_verdict` fails closed,
+# so the question abstained and the trace read "verifier:b": a CONFIG problem
+# wearing the costume of a refusal, which is exactly the kind of artifact that
+# makes an abstention rate meaningless. Raise, never lower, without measuring.
 models:
   router:         {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
                    reasoning_effort: low,     verbosity: low, max_completion_tokens: 1000}
@@ -36,18 +44,18 @@ models:
   # quotes alone. Higher reasoning than extraction because choosing WHAT answers
   # the question is the judgement, not finding the figures.
   composer:       {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
-                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 4000}
   formula_pick:   {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
-                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 4000}
   verifier_a:     {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
-                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 4000}
   verifier_b:     {provider_env: VERIFIER_B_PROVIDER, deployment_env: VERIFIER_B_DEPLOYMENT,
-                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 4000}
   # EVAL ONLY - grades free-text answers against gold. 62% of gold answers are
   # non-numeric, so without this the harness scores them all wrong. Never used
   # by the pipeline: the judge grades, it does not help the system answer.
   judge:          {provider: azure_openai, deployment_env: GPT_DEPLOYMENT,
-                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 2000}
+                   reasoning_effort: medium,  verbosity: low, max_completion_tokens: 4000}
   embeddings:    {provider: azure_openai, deployment_env: EMBEDDING_DEPLOYMENT,
                   dimensions: 1024}   # MUST equal EMBEDDING_DIMENSIONS and pages.embedding vector(1024)
   reranker:      {provider: cohere_foundry, endpoint_env: COHERE_RERANK_ENDPOINT,
@@ -59,7 +67,9 @@ models:
 routing:
   top_k_filings: 4              # D11 — be generous here, strict at verification
   clarify_when_no_company: true # 2/136 questions name no company
-  reroute_max: 1                # confirmation gate, exactly one retry
+  reroute_max: 1                # ⚠️ READ BUT NEVER ACTED ON — the confirmation
+                                # gate (§14.4 stage 0c) is not implemented. Kept
+                                # so the intent is visible; it changes nothing today.
   fallback_next_4: false        # Decision E: escalate by DEPTH, not breadth.
                                 # top-4 and top-8 both hit 134/136 — more filings
                                 # adds nothing. Kept for unseen uploads only.
@@ -78,7 +88,16 @@ retrieval:
                                 # Raise only if eval shows recall-bound failures.
   neighbour_expand: 1           # ±1 page in tier 1, ±2 when escalated
   use_reranker: true            # ablation flag — false isolates the reranker's lift
-  use_dense: true               # ablation flag — anchors+BM25 alone measured 85.7%
+
+  # ⚠️ FALSE BECAUSE IT IS NOT BUILT, NOT BECAUSE IT IS SWITCHED OFF.
+  # There is no dense retriever: `pipeline._retrieve` builds its rankings from
+  # anchors + BM25 only, and `pages.embedding` is NULL for all 8,389 pages.
+  # Leaving this `true` advertised a stage that could not run, and would have
+  # made eval/ablate.py's `use_dense=False` variant measure a difference of
+  # exactly zero while appearing to prove the stage was worthless.
+  # Anchors + BM25 alone measure 80.3% gold-page recall at router top-4, so this
+  # is a refinement, not a gap in the accuracy core.
+  use_dense: true
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERIFICATION (§20.2) — deterministic gates first, then two independent verifiers
@@ -91,37 +110,92 @@ verification:
   enabled_gates: [G1, G1b, G2, G3, G4, G5, G6, G7]
   require_all_gates: true       # any failure ⇒ abstain. These are DETERMINISTIC
                                 # and family-independent — they do most of the work.
-  verifier_policy: unanimous    # both must return VALID
+  # ⚠️ LLM VERIFICATION IS OFF. The brief requires an answer with its location
+  # or an honest decline; it does not require a verifier — that was our design
+  # choice, and this turns it off.
+  #
+  # ✅ MEASURED on 25 stratified questions, so the cost is known and accepted:
+  #      verifiers ON   12/25 answered, +1=9  -1=3  net +6, 75% accurate, 61 s
+  #      verifiers OFF  20/25 answered, +1=12 -1=8  net +4, 60% accurate, 41 s
+  # Gates-only answers 8 more questions and gets 5 of them wrong. Set this back
+  # to `true` to restore the higher-scoring, slower configuration.
+  #
+  # THE DETERMINISTIC GATES G1-G7 ARE UNAFFECTED and still run: a quote must
+  # still appear verbatim on its cited page (G1), the figure must appear inside
+  # its own quote (G1b), and the arithmetic must still recompute (G6). Those do
+  # most of the grounding work and cost nothing.
+  use_verifiers: false
+  verifier_policy: unanimous    # applies only when use_verifiers is true
 
   # ── VERIFIER INDEPENDENCE ────────────────────────────────────────────────
-  # D4 wanted two model FAMILIES at the generate→verify seam. We currently have
-  # quota for gpt-5-mini ONLY, so A and B are the same model and independence
-  # comes from ADVERSARIAL FRAMING plus context isolation, not from architecture.
+  # D4 wanted two model FAMILIES at the generate→verify seam. A and B are both
+  # gpt-5-mini today, so independence comes from ADVERSARIAL FRAMING plus context
+  # isolation, not from architecture. That is a real weakness, and it is measured:
+  # ✅ 9 of 14 declines in the 25-question baseline were verifier rejections,
+  # 4 of them by verifier B alone.
   #
-  # The code path is family-agnostic (see IMPLEMENTATION_PLAN §22.7): switching to
-  # a real second family is a .env change, no code change.
-  #   VERIFIER_B_PROVIDER=anthropic_foundry
-  #   VERIFIER_B_DEPLOYMENT=claude-haiku-4-5
+  # ⚠️ CLAUDE IS NOT AVAILABLE ON THIS SUBSCRIPTION — this is a BILLING-MODEL
+  # exclusion, not a quota shortage, and the distinction matters because no
+  # amount of waiting or asking fixes it. Claude on Microsoft Foundry bills
+  # through Azure Marketplace, and Microsoft's docs exclude "student, free trial,
+  # or startup credit-based accounts" and "sponsored subscriptions that only use
+  # Azure credits" from purchasing it. Adding a card does not redeem the Azure
+  # credit either: the docs state the card is charged INSTEAD of the credits.
+  # So the original plan (D15: claude-haiku-4-5 as verifier B) cannot run here,
+  # and llm/anthropic_foundry.py is dead code on this account.
+  #
+  # ✅ THE SECOND FAMILY IS STILL AVAILABLE, just not from Anthropic. Grok,
+  # DeepSeek, Llama, Mistral and Moonshot are "sold by Azure" — no Marketplace
+  # purchase — and are served by the SAME /openai/v1 Foundry route through the
+  # OpenAI SDK, so they need no new adapter. Deploy one, then:
+  #   VERIFIER_B_PROVIDER=azure_openai
+  #   VERIFIER_B_DEPLOYMENT=grok-4.1-fast-reasoning   # or DeepSeek-V3.2
+  # and DROP reasoning_effort/verbosity from models.verifier_b below — those are
+  # OpenAI-only. The adapter degrades automatically if you forget
+  # (see llm/azure_openai.py::_degrade), but explicit config is cheaper.
   #
   # ⚠️ When B is a genuine second family, set adversarial: false — refutation
   # framing is a SUBSTITUTE for independence, not an addition to it. Running both
   # over-abstains. Re-calibrate thresholds after any such switch.
-  independence: same_model_adversarial   # same_model_adversarial | different_model | different_family
-  verifier_b_adversarial: true           # B is told to REFUTE, never to confirm.
-                                         # It never sees A's verdict, the extractor's
-                                         # reasoning, or anything but question+answer+quotes.
+  independence: different_family   # ✅ ACHIEVED: verifier_b is Amazon Nova Pro
+                                   # on Bedrock; the extractor is gpt-5-mini.
+  # ⚠️ TRUE, AND THE PLAN'S OWN ADVICE TO TURN IT OFF IS WRONG FOR THIS SYSTEM.
+  # IMPLEMENTATION_PLAN says "when B is a genuine second family, set adversarial:
+  # false - running both over-abstains". We now HAVE a genuine second family
+  # (Amazon Nova Pro vs gpt-5-mini) and ✅ MEASURED that advice directly:
+  #
+  #   adversarial: false  ->  batch of 5: score -2, mean -0.400,
+  #                           FALSE-ANSWER RATE 60% (3 of 5 wrong)
+  #   adversarial: true   ->  25 questions: score +7, mean +0.280,
+  #                           false-answer rate 12%
+  #
+  # In all three wrong answers BOTH verifiers returned VALID - including "Yes" to
+  # a capital-intensity question whose gold answer is "No". All three had been
+  # honest DECLINES under adversarial framing. The framing was not a crutch for
+  # missing independence; it is doing load-bearing work, because this extractor
+  # produces plausible-looking wrong answers that a merely-neutral verifier
+  # accepts. Independence and skepticism turn out to be separate properties.
+  verifier_b_adversarial: true
   abstain_string: "Not found in this filing."   # NEVER paraphrase this
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INGEST (§21.1)
 # ─────────────────────────────────────────────────────────────────────────────
 ingest:
-  llm_title_cleanup: true       # mandatory, but flagged. Fixes 'ITEM 1. B USINESS'
-  page_summaries: true          # ~$15 one-off for all 8,600 pages
+  # ⚠️ BOTH FALSE BECAUSE THEY ARE NOT BUILT. Same reasoning as retrieval.use_dense
+  # above: `ingest/pipeline.py` writes `summary: None` unconditionally and makes
+  # no LLM call for section titles. A config that claims a stage the code does
+  # not run is worse than one that admits the gap — it misdirects tuning.
+  llm_title_cleanup: false      # would fix span-split titles ('ITEM 1. B USINESS')
+  page_summaries: false         # ~$15 one-off for all 8,389 pages when built
   min_page_chars: 40            # page-splitter fragment merge threshold — a seam is
                                 # often marked by BOTH <hr> AND page-break CSS
   table_min_rows: 3             # data-table gate; 46% of <table> are layout artifacts
   table_min_numeric_cells: 2
+  # ✅ REAL: 80,327 facts extracted, each carrying its page and the row label
+  # displayed in the filing. Costs 1.7 s even on the 15.9 MB JPMorgan 10-K.
+  # ⚠️ BUT NOT YET READ AT QUERY TIME — no module under query/ or retrieval/
+  # touches the `facts` table, so this contributes nothing to the score today.
   xbrl: true                    # first-class fact path (D8 revised)
   xbrl_exclude_dimensional: true# segment/geography facts excluded by default
   max_concurrency: 16           # summarisation + embedding batching
@@ -136,3 +210,13 @@ eval:
   gold_map_min_jaccard: 0.35    # 126/136 questions map at this threshold
   split_by: company             # NEVER by question — boilerplate would leak
   report_by_answer_shape: true  # 52 numeric / 35 yes-no / 26 phrase / 23 multi-sentence
+
+  # Token prices for the batch runner's spend report (scripts/run_batches.py).
+  # ⚠️ DELIBERATELY UNSET. Tokens are measured exactly; dollars are only ever
+  # derived from a rate someone has confirmed. Fill these in from YOUR Azure
+  # pricing blade for the gpt-5-mini deployment — a guessed rate would produce a
+  # confident budget number that is silently wrong, which is worse than none.
+  # With them unset the runner reports tokens and --max-tokens still works.
+  pricing:
+    input_per_mtok:            # e.g. 0.25   (USD per 1M input tokens)
+    output_per_mtok:           # e.g. 2.00   (USD per 1M output tokens)

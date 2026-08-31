@@ -44,6 +44,48 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in text or "rate limit" in text or "too many requests" in text
 
 
+def _is_unsupported_parameter(exc: Exception) -> bool:
+    """True when the endpoint rejected a request SHAPE, not its content.
+
+    Distinguished from a genuine error because the response is recoverable: drop
+    the parameters this model family does not implement and try once more. A
+    401, a quota error or a malformed schema must NOT be swallowed here.
+    """
+    text = str(exc).lower()
+    if "400" not in text and "unsupported" not in text and "invalid_request" not in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "reasoning_effort", "verbosity", "max_completion_tokens",
+            "response_format", "json_schema", "strict",
+            "unsupported parameter", "unrecognized request argument",
+        )
+    )
+
+
+def _degrade(kwargs: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """Retry shape for a model that does not speak OpenAI's dialect.
+
+    Drops the OpenAI-only knobs and swaps strict json_schema for plain JSON
+    mode, moving the schema into the system prompt so the output shape is still
+    specified. Every stage parses structured output, so the shape cannot simply
+    be abandoned.
+    """
+    out = dict(kwargs)
+    for key in ("reasoning_effort", "verbosity"):
+        out.pop(key, None)
+    out["response_format"] = {"type": "json_object"}
+    messages = [dict(m) for m in out["messages"]]
+    messages[0]["content"] = (
+        f"{messages[0]['content']}\n\n"
+        f"Reply with JSON only, conforming exactly to this schema:\n"
+        f"{json.dumps(schema)}"
+    )
+    out["messages"] = messages
+    return out
+
+
 def _build_client(settings: Settings):
     from openai import AzureOpenAI, OpenAI  # imported here: see module docstring
 
@@ -54,12 +96,26 @@ def _build_client(settings: Settings):
     if not api_key:
         raise LLMError("AZURE_OPENAI_API_KEY is not set")
 
+    # ⚠️ SET THE TIMEOUT EXPLICITLY. The SDK default is 600 s with no retries,
+    # and a dropped connection does not raise - it BLOCKS.
+    #
+    # ✅ MEASURED: switching networks mid-run left an eval hung for 7+ minutes
+    # with the process alive, zero CPU and no new output; the in-flight sockets
+    # were dead and nothing timed out. In a live session that is
+    # indistinguishable from "the system is thinking", for ten minutes.
+    #
+    # 180 s is far above the observed per-CALL cost (a 42k-token extraction
+    # runs 30-60 s, a verifier ~20 s) and far below the point where a human
+    # concludes the demo has crashed. Two retries cover a transient blip,
+    # which is the common case when a network changes underneath us.
+    client_kwargs = {"timeout": 180.0, "max_retries": 2}
     if "/openai/v1" in endpoint:
-        return OpenAI(base_url=endpoint, api_key=api_key)
+        return OpenAI(base_url=endpoint, api_key=api_key, **client_kwargs)
     return AzureOpenAI(
         azure_endpoint=endpoint,
         api_key=api_key,
         api_version=settings.azure_openai_api_version or "2024-10-21",
+        **client_kwargs,
     )
 
 
@@ -105,7 +161,25 @@ class AzureOpenAIProvider(LLMProvider):
         except Exception as exc:
             if _is_rate_limit(exc):
                 raise LLMRateLimited(f"{stage}: {exc}") from exc
-            raise LLMError(f"{stage}: {type(exc).__name__}: {exc}") from exc
+            if _is_unsupported_parameter(exc):
+                # ⚠️ THIS IS WHAT MAKES A SECOND MODEL FAMILY A CONFIG CHANGE.
+                # The `/openai/v1` Foundry route serves Grok, DeepSeek, Llama and
+                # Mistral through this same OpenAI-compatible client - which
+                # matters here, because Claude on Foundry bills through Azure
+                # Marketplace and is NOT purchasable on a credit-only
+                # subscription, so those are the only second families available
+                # to us. They do not all accept OpenAI's `reasoning_effort` /
+                # `verbosity`, and not all support strict json_schema.
+                #
+                # Rather than make the caller know which, drop the
+                # OpenAI-specific parameters and fall back to plain JSON mode,
+                # carrying the schema in the system prompt so the shape survives.
+                # Retried ONCE - a second failure is a real error.
+                resp = self._client.chat.completions.create(
+                    **_degrade(kwargs, schema)
+                )
+            else:
+                raise LLMError(f"{stage}: {type(exc).__name__}: {exc}") from exc
 
         choice = resp.choices[0]
         content = choice.message.content or ""

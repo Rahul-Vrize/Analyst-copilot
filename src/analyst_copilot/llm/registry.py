@@ -49,9 +49,35 @@ def _anthropic_foundry(settings: Settings, model) -> LLMProvider:
     return AnthropicFoundryProvider(settings, model)
 
 
+def _bedrock(settings: Settings, model) -> LLMProvider:
+    """Claude on AWS Bedrock — the only route to a genuine second family here.
+
+    Claude on Microsoft Foundry bills through Azure Marketplace, which a
+    credit-only subscription cannot purchase; Bedrock bills as ordinary AWS
+    usage against the account's credits.
+    """
+    from .bedrock import BedrockProvider
+
+    return BedrockProvider(settings, model)
+
+
+def _bedrock_converse(settings: Settings, model) -> LLMProvider:
+    """Amazon Nova on Bedrock — the second family that is actually reachable.
+
+    Claude is Marketplace-subscribed on BOTH Azure Foundry and AWS Bedrock, and
+    a credit-only account cannot complete either subscription. Amazon's own
+    models are first-party and have no such requirement.
+    """
+    from .bedrock_converse import BedrockConverseProvider
+
+    return BedrockConverseProvider(settings, model)
+
+
 _ADAPTERS: dict[str, Callable[[Settings, object], LLMProvider]] = {
     "azure_openai": _azure_openai,
     "anthropic_foundry": _anthropic_foundry,
+    "bedrock": _bedrock,
+    "bedrock_converse": _bedrock_converse,
 }
 
 

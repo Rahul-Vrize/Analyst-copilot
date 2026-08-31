@@ -30,6 +30,7 @@ from .catalog import FilingMeta, parse_filing_name
 from .pages import parse_document
 from .sections import build_tree, extract_anchor_targets
 from .tables import parse_table
+from .xbrl import FactExtractor, fact_rows
 
 # Rough token estimate; only used for the assembly budget, never for billing.
 _CHARS_PER_TOKEN = 4
@@ -45,6 +46,7 @@ class IngestResult:
     aligned_tables: int
     cells: int
     sections: int
+    facts: int = 0
     skipped: bool = False
     error: str | None = None
 
@@ -111,7 +113,7 @@ def ingest_filing(
             progress(status, pct)
 
     if not force and repo.content_hash_of(conn, meta.doc_id) == digest:
-        return IngestResult(meta.doc_id, 0, 0, 0, 0, 0, 0, 0, skipped=True)
+        return IngestResult(meta.doc_id, 0, 0, 0, 0, 0, 0, 0, 0, skipped=True)
 
     repo.upsert_filing(
         conn,
@@ -143,11 +145,26 @@ def ingest_filing(
     page_tuples = [(p.page_seq, p.raw_text) for p in doc.pages]
 
     # S6 - the section tree, before pages so a page can carry its section path.
-    anchors: dict[str, str] = {}
-    for el in list(doc.elements.values())[:1]:
+    # An EDGAR full submission concatenates several <html> documents, so there
+    # is more than one root. Anchors come from the first (the filing body);
+    # XBRL contexts are collected from ALL of them, because a fact rendered in
+    # an exhibit still resolves against the header's contexts.
+    roots: list = []
+    seen_roots: set[int] = set()
+    for el in doc.elements.values():
         root = el.getroottree().getroot()
-        anchors = extract_anchor_targets(root)
-        break
+        if id(root) not in seen_roots:
+            seen_roots.add(id(root))
+            roots.append(root)
+    anchors: dict[str, str] = extract_anchor_targets(roots[0]) if roots else {}
+
+    # S8 - inline XBRL. Pure lxml, no model call. Skipped entirely when the
+    # filing carries no tags (20 of 78 are pre-2019), which is the HTML-only
+    # path, not a failure.
+    facts = FactExtractor(roots) if (settings.ingest.xbrl and roots) else None
+    if facts is not None and facts.is_empty:
+        facts = None
+    fact_row_accum: list[dict[str, Any]] = []
     sections = build_tree(page_tuples, anchors, form_type=meta.form_type)
     report("sections", 0.35)
 
@@ -190,6 +207,9 @@ def ingest_filing(
                 n_data += 1
                 # Verbatim headers feed BM25 - see build_lexical_text.
                 table_header_strings.extend(parsed.header_tokens)
+                # ...and so do row labels, which are the line items a question
+                # actually names. See ParsedTable.row_labels.
+                table_header_strings.extend(parsed.row_labels)
                 if parsed.caption:
                     table_header_strings.append(parsed.caption)
             if parsed.alignment_ok:
@@ -258,6 +278,11 @@ def ingest_filing(
                 }
             )
 
+        if facts is not None:
+            fact_row_accum.extend(
+                fact_rows(facts.facts_for(elements), meta.doc_id, pid)
+            )
+
         header = context_header(meta, page.page_seq, page.page_printed, sec_title)
         page_rows.append(
             {
@@ -311,6 +336,7 @@ def ingest_filing(
     repo.insert_blocks(conn, block_rows)
     repo.insert_tables(conn, table_rows)
     repo.insert_table_cells(conn, cell_rows)
+    repo.insert_facts(conn, fact_row_accum)          # S8, after pages (FK)
 
     with conn.cursor() as cur:
         cur.execute(
@@ -329,4 +355,5 @@ def ingest_filing(
         aligned_tables=n_aligned,
         cells=len(cell_rows),
         sections=len(sections),
+        facts=len(fact_row_accum),
     )

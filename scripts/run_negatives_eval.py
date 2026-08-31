@@ -24,6 +24,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -39,9 +40,33 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--out", default=".cache/negatives_eval.json")
+    # Same calibration overrides as scripts/run_batches.py, so BOTH axes of
+    # the curve can be measured under one configuration without editing
+    # config.yaml. Score alone is not an operating point; the pair is.
+    parser.add_argument("--verifier-b-adversarial", choices=["true", "false"],
+                        default=None)
+    parser.add_argument("--verifier-policy", choices=["unanimous", "any"],
+                        default=None)
     args = parser.parse_args()
 
     settings = load_settings()
+    if args.verifier_b_adversarial is not None or args.verifier_policy is not None:
+        settings = replace(
+            settings,
+            verification=replace(
+                settings.verification,
+                verifier_b_adversarial=(
+                    args.verifier_b_adversarial == "true"
+                    if args.verifier_b_adversarial is not None
+                    else settings.verification.verifier_b_adversarial
+                ),
+                verifier_policy=(
+                    args.verifier_policy or settings.verification.verifier_policy
+                ),
+            ),
+        )
+    print(f"verifiers: policy={settings.verification.verifier_policy}, "
+          f"b_adversarial={settings.verification.verifier_b_adversarial}")
     negatives = load(Path(args.path))
     if args.limit:
         negatives = negatives[: args.limit]

@@ -25,7 +25,8 @@ is not on the cited page.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 from ..llm import schemas
 from ..llm.base import LLMError, LLMProvider
@@ -38,6 +39,56 @@ class ComposedAnswer:
     text: str
     answerable: bool = True
     used_model: bool = False
+    # Which quotes the composer says its answer rests on. Advisory for now -
+    # recorded so its predictive value can be measured before it gates anything.
+    supporting_quote_indexes: list[int] = field(default_factory=list)
+    # True when a refusal was caught in the prose rather than the flag. Worth
+    # counting: it means the prompt's rule 5 is not landing.
+    declined_in_prose: bool = False
+
+
+# ⚠️ A REFUSAL WRITTEN AS PROSE IS STILL A REFUSAL, AND SHIPPING IT AS AN ANSWER
+# COSTS TWO POINTS.
+# ✅ MEASURED (financebench_id_00678): the composer replied
+#     "I cannot determine whether Boeing has an improving gross margin profile
+#      as of FY2022 because the only supplied data are total revenues ... and no
+#      gross profit or cost of goods sold figures are provided."
+# That is EXACTLY the behaviour this system is built to produce — it recognised
+# its evidence was insufficient and said so. But it set `answerable: true`, so
+# the text went out as `status="answered"` and the rubric scored it -1 instead
+# of the 0 an honest refusal earns. The system was right and the plumbing
+# punished it.
+#
+# The schema flag alone cannot be trusted: the model reasons its way to "I can't
+# answer this" in the prose while leaving the boolean at its default. So the
+# TEXT is checked too.
+#
+# Deliberately anchored to the OPENING of the answer. A real answer may well
+# contain "not disclosed" partway through ("segment detail is not disclosed, but
+# total revenue was $X"); one that OPENS by declining is declining.
+_DECLINE_OPENING = re.compile(
+    r"^\W*(?:"
+    r"i\s+(?:cannot|can't|am\s+unable|do\s+not\s+have)"
+    r"|(?:it\s+is\s+)?not\s+possible\s+to\s+determine"
+    r"|unable\s+to\s+(?:determine|answer|verify)"
+    r"|cannot\s+be\s+determined"
+    r"|there\s+is\s+(?:no|insufficient)\s+"
+    r"|(?:the\s+)?(?:provided|supplied|available|given)\s+"
+    r"(?:pages?|passages?|excerpts?|evidence|data|information|quotes?)\s+"
+    r"(?:do(?:es)?\s+not|don't|doesn't)"
+    r"|no\s+(?:information|evidence|data)\s+(?:is\s+)?(?:provided|available|given)"
+    r")",
+    re.I,
+)
+
+
+def reads_as_decline(text: str) -> bool:
+    """True when composed prose is itself a refusal.
+
+    Routing it to the abstain path converts a -1 into a 0 — and emits the exact
+    refusal string, which is what the rubric actually scores.
+    """
+    return bool(_DECLINE_OPENING.match((text or "").strip()))
 
 
 def _pick_slot(extraction: Extraction, question_years: list[int]):
@@ -104,6 +155,30 @@ def compose_answer(
 
     if not data.get("answerable", True):
         return ComposedAnswer("", answerable=False)
+
+    text = (data.get("answer") or "").strip()
+    # The flag says answerable, but the prose may say otherwise. Trust the prose:
+    # shipping a written refusal as an answer scores -1 where declining scores 0.
+    # The prompt now forbids prose refusals outright; this stays as the backstop,
+    # because the cost of one slipping through is two points.
+    if reads_as_decline(text):
+        return ComposedAnswer("", answerable=False, declined_in_prose=True)
+
+    # ⚠️ GROUNDING SIGNAL THAT WAS BEING THROWN AWAY. `supporting_quote_indexes`
+    # has always been in the schema and was never read. A composer that cannot
+    # name a single quote its answer rests on is not answering from the
+    # evidence - which is exactly the relevance failure that produced a -1 on
+    # financebench_id_01935 (asked about supplemental indentures, answered about
+    # an accounting-standard adoption).
+    #
+    # Treated as ADVISORY, not a gate: the field is model-populated, so making it
+    # mandatory would convert a formatting lapse into a lost answer. It is
+    # recorded so the next run can measure whether it predicts wrong answers
+    # before anything is gated on it.
+    supporting = data.get("supporting_quote_indexes")
     return ComposedAnswer(
-        (data.get("answer") or "").strip(), answerable=True, used_model=True
+        text,
+        answerable=True,
+        used_model=True,
+        supporting_quote_indexes=list(supporting) if supporting else [],
     )

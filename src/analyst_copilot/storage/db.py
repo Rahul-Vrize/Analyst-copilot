@@ -55,11 +55,18 @@ def healthcheck(conn: psycopg.Connection) -> dict[str, object]:
     with conn.cursor() as cur:
         cur.execute("SELECT extname FROM pg_extension ORDER BY extname")
         extensions = [r["extname"] for r in cur.fetchall()]
+        # ⚠️ `'pages'::regclass` RAISES when the table does not exist, and this
+        # function's whole job is to be safe to call on a database that has not
+        # been migrated yet. ✅ MEASURED: pointing at a fresh database produced
+        # `relation "pages" does not exist` as an unhandled traceback, so
+        # `ingest_all.py`'s helpful "schema not applied - run the migration"
+        # message could never be reached. That is precisely the from-zero path
+        # a grader takes. `to_regclass` returns NULL instead of raising.
         cur.execute(
             """
             SELECT format_type(atttypid, atttypmod) AS t
             FROM pg_attribute
-            WHERE attrelid = 'pages'::regclass AND attname = 'embedding'
+            WHERE attrelid = to_regclass('public.pages') AND attname = 'embedding'
             """
         )
         row = cur.fetchone()

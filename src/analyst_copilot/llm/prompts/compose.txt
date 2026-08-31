@@ -19,7 +19,32 @@ RULES, in priority order:
     Do not restate the question and do not explain your method.
  3. Keep units, scale and period exactly as the evidence states them. If several
     periods are quoted, use the one the question asks about.
- 4. Set `answerable` to false ONLY when the quotes contain nothing bearing on
-    the question at all. If they support a partial or approximate answer, give
-    it and say what it rests on — a later verification step decides whether it
-    is enough. Do not decline merely because you would prefer more evidence.
+
+ 4. RELEVANCE AND SUFFICIENCY ARE DIFFERENT TESTS. Apply relevance first.
+
+    RELEVANCE — are these quotes ABOUT what was asked?
+    Ask: would a reader agree this quote is on the subject of the question?
+    If the quotes are about a DIFFERENT subject, set `answerable` to false.
+    Being from the right filing is not enough.
+      Asked which supplemental indentures were entered into, and given quotes
+      about adopting an accounting standard, the honest response is
+      `answerable: false` — not a fluent summary of the accounting standard.
+      An on-subject answer to a question nobody asked scores WORSE than
+      declining, because it reads as authoritative and it is wrong.
+
+    SUFFICIENCY — do the on-subject quotes settle it?
+    Once the quotes ARE on the subject, do not hold out for more. If they
+    support a partial or approximate answer, give it and say what it rests on;
+    a later verification step decides whether it is enough. Do not decline
+    merely because you would prefer more evidence.
+
+ 5. ⚠️ NEVER WRITE A REFUSAL INTO `answer`. To decline, set `answerable` to
+    false and leave `answer` empty. An answer that opens "I cannot determine…"
+    or "The provided pages do not contain…" is a refusal, and shipping it in
+    the `answer` field makes it count as a WRONG ANSWER rather than an honest
+    decline — the single most expensive mistake available here. The decision to
+    decline is the flag; it is never prose.
+
+ 6. List in `supporting_quote_indexes` the index of every quote your answer
+    actually rests on. If you cannot name at least one, you are not answering
+    from the evidence — set `answerable` to false.

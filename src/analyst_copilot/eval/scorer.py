@@ -107,29 +107,89 @@ def parse_number(text: str) -> Decimal | None:
     return -value if negative else value
 
 
-def numbers_match(gold: str, candidate: str, tolerance: Decimal) -> bool:
-    """Compare within a relative tolerance, after normalising scale.
+def parse_numbers(text: str) -> list[Decimal]:
+    """EVERY figure in the text, scale words applied, most-likely-first.
 
-    Percentages are compared on their face value (12.4% vs 0.124 would be a
-    presentation difference, but treating them as equal risks accepting a
-    genuinely wrong figure, so it is deliberately NOT done here).
+    ⚠️ THE FIRST NUMBER IS NOT THE ANSWER, AND ASSUMING IT WAS COST US A -1 ON A
+    CORRECT ANSWER. ✅ MEASURED: the system replied
+
+        "The FY2018 capital expenditure (Purchases of property, plant and
+         equipment) was $1,577 million."
+
+    which is exactly right. Taking the first match parsed **2018** out of
+    "FY2018", compared it to gold 1577, and scored the question -1. The SAME
+    correct fact scored +1 on another run only because that phrasing happened to
+    open with "$1,577".
+
+    A harness that reports a correct answer as a confident wrong answer corrupts
+    the one metric calibration depends on - the false-answer rate - and in the
+    direction that makes the system look dangerous when it is not.
+
+    So: collect every candidate, and rank bare four-digit years LAST. A year is
+    still returned, because a gold answer can legitimately BE a year; it simply
+    stops out-ranking the figure standing next to it.
     """
-    g, c = parse_number(gold), parse_number(candidate)
-    if g is None or c is None:
-        return False
-    if g == c:
+    candidates: list[Decimal] = []
+    years: list[Decimal] = []
+    for match in _NUM_WITH_SCALE.finditer(text or ""):
+        raw, scale = match.group(1), (match.group(2) or "").lower()
+        negative = "(" in raw
+        cleaned = raw.replace("(", "").replace(")", "").replace("$", "")
+        cleaned = cleaned.replace(",", "").replace("+", "").strip()
+        if cleaned.startswith("-"):
+            negative, cleaned = True, cleaned[1:].strip()
+        if not cleaned:
+            continue
+        try:
+            value = Decimal(cleaned)
+        except InvalidOperation:
+            continue
+        if scale in _SCALES:
+            value *= _SCALES[scale]
+        value = -value if negative else value
+
+        # A bare 4-digit year with no scale word and no separators is almost
+        # always the PERIOD, not the figure ("FY2018", "in 2022").
+        bare_year = (
+            not scale
+            and "," not in raw and "." not in raw and "$" not in raw
+            and Decimal(1900) <= value <= Decimal(2100)
+        )
+        (years if bare_year else candidates).append(value)
+    return candidates + years
+
+
+def _within(gold: Decimal, candidate: Decimal, tolerance: Decimal) -> bool:
+    if gold == candidate:
         return True
-    if g == 0:
-        return abs(c) <= tolerance
-    if abs(g - c) / abs(g) <= tolerance:
+    if gold == 0:
+        return abs(candidate) <= tolerance
+    if abs(gold - candidate) / abs(gold) <= tolerance:
         return True
     # A pure scale mismatch (8.70 vs 8,700) is still the same fact if one side
     # simply omitted its unit word.
     for factor in (Decimal(10) ** 3, Decimal(10) ** 6, Decimal(10) ** 9):
-        for a, b in ((g * factor, c), (g, c * factor)):
+        for a, b in ((gold * factor, candidate), (gold, candidate * factor)):
             if b != 0 and abs(a - b) / abs(b) <= tolerance:
                 return True
     return False
+
+
+def numbers_match(gold: str, candidate: str, tolerance: Decimal) -> bool:
+    """True when the answer STATES the gold figure, within tolerance.
+
+    Any figure in the answer may be the one asked for: a correct answer
+    routinely names its period and its line item alongside the value. Requiring
+    the value to be first is a constraint on PHRASING, not on correctness.
+
+    Percentages are compared on face value (12.4% vs 0.124 would be a
+    presentation difference, but treating them as equal risks accepting a
+    genuinely wrong figure, so it is deliberately NOT done).
+    """
+    g = parse_number(gold)
+    if g is None:
+        return False
+    return any(_within(g, c, tolerance) for c in parse_numbers(candidate))
 
 
 # ---------------------------------------------------------------------------

@@ -1,205 +1,78 @@
 # Approach Note — The Analyst Copilot
 
-*"We read this as carefully as we read your score."*
+*"We read this as carefully as we read your score."* So this is written to be checked, not admired. Every number below is measured, and the failures are here too.
 
 ---
 
-## 1. What the score is actually asking for
+## 1. What the score is really asking for
 
-| Outcome | Score |
-|---|---|
-| Correct answer, correct location | **+1** |
-| `Not found in this filing.` | **0** |
-| Correct answer, **wrong location** | **0** |
-| Confidently wrong answer | **−1** |
+A wrong answer costs **two points relative to a refusal** (−1 vs 0). That makes this precision-calibrated selective answering, not accuracy maximisation — and it means **any change must be reported with its false-answer rate beside its score**. A configuration that answers more and is wrong more is a regression, however good the headline looks.
 
-A wrong answer costs **two points relative to a refusal**. So the task is
-**precision-calibrated selective answering**, not accuracy maximisation — and a
-component that raises the answer rate while raising the false-answer rate is a
-regression, not an improvement. Every measurement below reports both.
+The second constraint shapes everything else: **the chatbot holds all 78 filings and the user never picks one.** This is the shared-corpus setting, where FinanceBench's own shared-vector-store baseline scored ~19%. Document routing is a first-class stage, and a routing error is a −1, not a 0.
 
-The second constraint shapes everything else: **the chatbot holds all 78 filings
-and the user never selects one.** This is the shared-corpus setting, where
-FinanceBench's own shared-vector-store baseline scored **~19%**. Document
-routing is therefore a first-class stage, and a routing error is a −1, not a 0.
-
----
-
-## 2. The finding the design rests on
+## 2. The finding the architecture rests on
 
 We measured retrieval on the real corpus before building anything:
 
 | Approach | Gold page in the candidate set |
 |---|---|
-| Corpus-wide BM25 | **5.6%** |
-| BM25 with the correct document handed over (oracle) | **18.3%** |
+| Corpus-wide BM25 | 5.6% |
+| BM25 with the correct document handed over | 18.3% |
 | **Structure anchors alone** — 7 regexes over page headers, no LLM | **73.2%** |
 | Anchors + BM25@20, oracle document | **85.0%** |
 | Anchors + BM25@20, real router at top-4 | **80.3%** |
 
-**Retrieval in SEC filings is navigation, not similarity search.** Structure
-beats lexical search by more than 3×, because ~75% of gold evidence sits in the
-three primary financial statements and those have stable, recognisable titles.
+**Retrieval in SEC filings is navigation, not similarity search.** ~75% of gold evidence sits in the three primary financial statements, which have stable, recognisable titles. That single result determined the design: find the *document*, then the *statement*, then the *page* — and use similarity search only to fill gaps. A deterministic router (no LLM) reaches **95.6% top-1 / 98.5% top-4**; the two misses name no company at all and take a clarifying-question path, because a wrong document is −1 and a clarification is free.
 
-That single result determined the architecture: find the *document*, then the
-*statement*, then the *page* — and use similarity search only to fill gaps.
+## 3. Where it stands
 
----
+25 stratified questions, 19 companies, shape mix preserved:
 
-## 3. The pipeline
+| Shape | n | Mean | +1 | declined | −1 |
+|---|---|---|---|---|---|
+| numeric | 10 | **+0.600** | 6 | 4 | **0** |
+| yes/no | 7 | 0.000 | 1 | 5 | 1 |
+| phrase | 4 | +0.250 | 1 | 3 | 0 |
+| multi-sentence | 4 | **−0.500** | 0 | 2 | 2 |
+| **overall** | **25** | **+0.200** | 8 | 14 | 3 |
 
-```
-route → navigate → RETRIEVE → extract → COMPUTE → verify → ANSWER
-```
+Roughly break-even, and we would rather say so than quote a flattering subset. The distribution is the useful part: **numeric answers work** (+0.600, zero wrong), **multi-sentence loses points** (−0.500 — the system would score better by declining every one), and **14 of 25 declines** means the abstention gate is currently too tight. Of those declines, 9 are LLM-verifier rejections.
 
-One spine, switchable stages. **This is a deterministic workflow, not an
-agent.** Control flow lives in code; the model chooses *content* — which
-evidence, which formula, which wording — never *what happens next*. In loose
-industry terms it is "agentic RAG"; the honest label is **structure-aware RAG
-with an evidence-first verification gate**, and we would rather say that than
-claim autonomy we deliberately avoided.
+## 4. What measurement changed — the part worth reading
 
-**1 · Route.** A deterministic scorer — no LLM — ranks all 78 filings on company
-alias, fiscal year, form type and 8-K event date.
+**Three defects were stacked on the calculator, and every one looked like "the filing lacks the evidence."**
 
-| | Measured |
-|---|---|
-| top-1 | **95.6%** |
-| top-4 | **98.5%** (134/136) |
+1. `evaluate()` resolves operands by exact name, but nothing ever told the extractor what those names were. It invented `fy2019_revenue` where the formula wanted `revenue`; every derived answer died on `operand 'revenue' is not available` → gate G4 → abstain. That silently disabled **the entire domain-relevant category**.
+2. Gate G6 compared a *rounded* stated answer against an *unrounded* result at 1e-6 tolerance, rejecting `24.26` against `24.2579…`. Every rounded metric in the book failed this way.
+3. The verifier spent its whole completion budget on hidden reasoning and returned empty content; failing closed turned a **config problem into a refusal**.
 
-The two misses name no company at all; both take a **clarifying question**,
-because a wrong document is −1 and a clarification is free. Escalation deepens
-*inside* the top-4 rather than widening: top-4 and top-8 both reach 134/136, so
-more documents buy nothing.
+All three had to fall before one computed answer got through. Fixed: the formula is now chosen *before* extraction so the operand names can be communicated, G6 accepts the value at its declared precision, and reasoning stages have budget headroom. Fixed-asset turnover and DPO now return 24.26 and 93.86 — gold exactly.
 
-**2 · Retrieve.** Structure anchors ∪ in-memory BM25 over a composite lexical
-field, with **k allocated per candidate filing** — a single global top-20 lets a
-strongly-scoring wrong filing crowd out the right one (74.8% → 80.3%).
+**Our own harness was scoring correct answers as wrong.** It parsed the first number in an answer, so *"The FY2018 capital expenditure … was $1,577 million"* was scored against **2018** and marked a confident wrong answer. A harness that inflates the false-answer rate corrupts the one metric calibration is chosen on. The scorer now considers every figure and ranks bare years last.
 
-**3 · Extract.** Evidence *slots*, never prose: each carries a value, unit,
-period, location and a **verbatim quote**. A quote can be checked
-character-by-character; a prose answer cannot.
+**An honest refusal was being scored as a lie.** The composer wrote *"I cannot determine … no gross profit figures are provided"* — exactly the behaviour this system exists to produce — while leaving `answerable: true`, so it shipped as an answer and took −1 instead of 0. The composer prompt now forbids prose refusals, and the code checks the prose as a backstop.
 
-**4 · Compute.** Python `Decimal` over an AST-whitelisted expression. The model
-never does arithmetic — program-of-thought execution is measured elsewhere to
-remove 88% of arithmetic errors. Formula precedence: a definition supplied *in
-the question* (14/136 questions carry one) → a curated 25-metric book → an
-LLM-proposed formula behind four checks → refuse.
+**The benchmark itself has defects.** 7 of 136 practice questions cannot be answered from the supplied corpus: the J&J and PepsiCo 8-Ks are the *wrong filings* (inline-XBRL cover dates 2023-01-24 and 2023-02-09 don't match the events the questions ask about) and omit the Exhibit 99.1 the gold text is quoted from; CVS's income-statement figures appear nowhere in its HTML. Reported and excluded from the denominator, never fitted to.
 
-**5 · Verify.** Deterministic gates first, then two isolated LLM verifiers.
+**One of our own synthetic negatives was poisoned.** A mechanical review against the corpus found `neg_031` asking for Kraft Heinz's FY2019 goodwill impairment — which the filing *does* record ("goodwill impairment losses of $7…"). Calibrating against it would have taught the system to refuse something it should answer. 47 of 60 negatives are now verified against the catalog and full text; 13 need human judgement and are flagged, not assumed.
 
----
+## 5. What we kept
 
-## 4. The gates — where the −1s are prevented
+Structure anchors over embeddings; a deterministic router over a semantic one; **arithmetic in Python `Decimal`, never in the model**; and gate **G1 — the quote must appear verbatim on the cited page**, which makes an invented figure or fabricated citation structurally impossible for the cost of one string search. The gates are deterministic and model-independent, which is what carries the system.
 
-| Gate | Predicate |
-|---|---|
-| **G1** | the quote appears **verbatim** on the cited page |
-| **G1b** | the reported figure appears **inside its own quote** |
-| G2 | every cited document is in the routed candidate set |
-| G3 | the evidence period is within the filing's `coverage_years` (or intent is forecast) |
-| G4 | no missing operands (for answers built from operands) |
-| G5 | operand units and scales are compatible |
-| G6 | re-evaluating the formula reproduces the stated answer |
-| G7 | the cited page exists |
+## 6. What we threw away
 
-**G1 is the single most important piece of code in the system.** It makes an
-invented figure or a fabricated citation *structurally impossible*, and it costs
-one string search. The gates are deterministic and model-independent, which is
-what carries the system given the constraint in §6.
+Whole-filing long context (cost, weak location control). Escalating to more documents — top-4 and top-8 both reach 134/136, so we escalate by *depth* instead. Chasing FinanceBench's `evidence_page_num`, which indexes a third-party PDF we cannot reproduce for an uploaded filing; location is scored by evidence-text overlap. And we declined to make the "obvious" verifier fix on the evidence available: disabling the adversarial framing everyone expected to be the problem scored *identically* (+1/5 both arms) while producing a confident wrong answer where the shipping config produced none. At n=5 that is not proof it is worse — it is proof it is not the free win it looked like, which was enough to stop us shipping it untested.
 
-They are a list of objects, not an if-chain, so the ablation runner can disable
-exactly one and measure what it was worth.
+## 7. Honest limitations
 
----
+- **Verifier independence is degraded.** D4 wanted two model families at the generate→verify seam; both verifiers are `gpt-5-mini`, so independence comes from adversarial framing and context isolation, not architecture. Claude on Foundry bills through Azure Marketplace, which a credit-only subscription cannot purchase — a billing-model exclusion, not a quota issue. The seam is family-agnostic and Grok/DeepSeek are reachable on the same route; the swap is configuration.
+- **The system over-abstains.** 56% declines. Safe under this rubric, but the brief is explicit that always abstaining finishes at exactly zero.
+- **Multi-sentence answers are a net negative** and the failures are relevance, not grounding — the evidence is real and correctly located, it just doesn't answer the question.
+- **Latency is 60–300 s per question** across 5–9 sequential model calls.
+- **Inline XBRL is extracted** (1.7 s even for the 15.9 MB filing, with each fact carrying its own page and row label) but **is not yet read at query time**, so it contributes nothing to the score today.
+- **n=25.** With a 12% false-answer rate the interval is wide; +0.200 means "roughly break-even, numeric clearly working", not a settled number.
 
-## 5. What measurement changed — three corrections
+## 8. Generalisation
 
-We reversed three plausible beliefs by testing them.
-
-**1 · `<hr>` is not a page break.** `MICROSOFT_2016_10K` contains 1,836 `<hr>`,
-of which **1,728 sit inside a `<td>`** — they are cell rules under financial
-figures. Treating them as page seams split that filing into **343 pages instead
-of 107**, shredding every statement. A page seam cannot occur inside a table
-cell; that structural rule fixed it without touching any other filing.
-
-**2 · Three filings are EDGAR full submissions.** They wrap several concatenated
-`<html>` documents, and `lxml` parses only the first — so we were extracting
-~3.5k characters of EDGAR navigation chrome and **none of the filing**. AMCOR's
-8-K body sits at byte 82,776 of 142,400. This also explained a "fact" we had
-recorded: those three were the only filings with *no page-break markers*. They
-have none because we were never looking at their content. Corrected: **all 78
-have markers**, and gold-page mapping rose to **127/136**.
-
-**3 · The benchmark contains defects.** ✅ **7 of the 136 practice questions
-cannot be answered from the supplied corpus.** The J&J and PepsiCo 8-K files are
-the *wrong filings* — their inline-XBRL cover dates (2023-01-24, 2023-02-09) do
-not match the events their filenames and questions refer to — and they omit the
-Exhibit 99.1 the gold evidence is quoted from. CVS's income-statement figures
-appear nowhere in its HTML in any formatting.
-
-We report these separately rather than fitting to them, because fitting would
-mean fabricating evidence. They are also the only **natural negatives** the
-practice set contains, and a real question with genuinely absent evidence is a
-better abstention signal than anything synthetic.
-
----
-
-## 6. What we did not get, and how we handled it
-
-**Verifier independence is degraded, and we would rather say so.** The design
-called for two model *families* at the generate→verify seam, because a model
-checking its own output is not verification. Only `gpt-5-mini` is deployed to
-us, so both verifiers are the same model and independence comes from
-**adversarial framing plus context isolation**, not architecture. Verifier B is
-told to *refute*, and sees only question + answer + quotes — never verifier A's
-verdict, never the extractor's reasoning.
-
-This is survivable because **the deterministic gates do most of the work and are
-family-independent**. The LLM verifiers are the last net, not the first.
-
-The swap path is built, not deferred: moving verifier B to another family is
-three lines in `.env` and one config value, with an adapter already written and
-imported in tests. When that happens, adversarial framing must be turned **off**
-— it is a substitute for independence, not an addition — and the abstention
-threshold re-calibrated.
-
----
-
-## 7. Generalisation
-
-**The 136 questions are test data, not the specification.** Judges may ask
-different questions over filings we have never seen, so every stage is generic
-and 100% accuracy is explicitly not the target.
-
-This is enforced mechanically, not promised: `tests/test_generalisation_guard.py`
-fails the build if any module under `ingest/ retrieval/ query/ storage/ api/
-llm/` reads a benchmark id, a gold field, or hardcodes a document identity —
-and separately if anything but `config.py` reads the environment, or anything
-but `llm/` imports a vendor SDK. Benchmark knowledge is confined to `eval/`.
-
-The line we drew: **router weights, the alias table, anchor regexes and the
-formula book are general mechanisms tuned on this corpus** — they would be
-written the same way for 10,000 unseen filings. A lookup from question to
-document would not be. The dev/blind split is **by company**, never by question,
-so the blind number estimates unseen-company performance.
-
----
-
-## 8. Honest limitations
-
-* **Table alignment validates on 28% of data tables** corpus-wide. Where it
-  fails there is markdown and **no typed cells** — fail closed: a typed fact
-  exists only when its provenance is provable. Raising this is a measurable
-  tuning task, not a redesign.
-* **Latency is 60–130 s per question**, dominated by 4–6 sequential model calls
-  on a rate-limited deployment. Batching and caching are unexploited.
-* **Dense embeddings and page summaries are built but not populated.** The
-  measured recall above is anchors + BM25 only; the composite lexical field
-  already carries verbatim table and section headers, which is where most of the
-  lift came from.
-* **The abstention threshold is not yet calibrated** against the 60-item
-  negative set. Until it is, we report the operating point we have rather than
-  claiming a tuned one.
-* Answers are currently composed one question at a time with no conversational
-  memory.
+The 136 questions are test data, not the specification. `tests/test_generalisation_guard.py` fails the build if any module under `ingest/ retrieval/ query/ storage/ api/ llm/` reads a benchmark id, a gold field, or hardcodes a document identity — benchmark knowledge is confined to `eval/`. Router weights, the alias table, anchor regexes and the formula book are general mechanisms tuned on this corpus; a lookup from question to document would not be.

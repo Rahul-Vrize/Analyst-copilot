@@ -100,14 +100,41 @@ def test_extractor_prompt_forbids_using_model_knowledge():
 
 
 def test_verifier_prompt_follows_the_independence_setting():
-    """Refutation framing is a SUBSTITUTE for a second family, not an addition."""
+    """Refutation framing is a SUBSTITUTE for a second family, not an addition.
+
+    ⚠️ THIS TEST USED TO REQUIRE "Default to REFUTED when uncertain", AND THAT
+    CLAUSE WAS REMOVED ON EVIDENCE. ✅ MEASURED on the full practice set: 48 of
+    90 refusals were verifier rejections, and 40 of those (83%) objected to
+    units, period or column labels - while 40 of the 48 HAD the gold page in
+    context. A quote is one row of a financial table; its units and fiscal-year
+    headings live in the table header, so "uncertain" was the default state for
+    almost every correct answer, and the clause converted that into rejection.
+
+    The adversarial FRAMING is what buys independence and it is still asserted
+    below. What is no longer acceptable is rejecting without a nameable defect.
+    """
     settings = load_settings()
     prompt = verifier_prompt(settings)
     if settings.verification.verifier_b_adversarial:
         assert "REFUTE" in prompt
-        assert "Default to REFUTED when uncertain" in prompt
+        # A refutation must point at something, not merely feel unsure.
+        assert "must name a defect" in prompt
+        assert "Default to REFUTED when uncertain" not in prompt
     else:
         assert "VALID" in prompt
+
+
+def test_verifier_prompts_direct_the_reviewer_to_the_cited_page():
+    """Both prompts must tell the reviewer to resolve units from the page.
+
+    The verifier is handed the full cited page precisely so that units and
+    fiscal-year columns are resolvable; a prompt that does not say so leaves
+    the reviewer objecting to the terseness of the quote instead of reading.
+    """
+    for name in ("verify", "verify_adversarial"):
+        prompt = load_prompt(name)
+        assert "table header" in prompt, name
+        assert "in millions" in prompt, name
 
 
 def test_verifier_b_is_configured_and_swappable():
@@ -137,3 +164,46 @@ def test_reasoning_truncation_has_its_own_error_type():
     from analyst_copilot.llm.base import LLMError, LLMTruncated
 
     assert issubclass(LLMTruncated, LLMError)
+
+
+def test_verifiers_can_be_switched_off_without_touching_gates():
+    """⚠️ `use_verifiers: false` must disable ONLY the LLM verification.
+
+    The deterministic gates G1-G7 do the grounding work and cost nothing: a
+    quote must still appear verbatim on its cited page, the figure must appear
+    inside its own quote, and the arithmetic must still recompute. Turning off
+    the LLM reviewers must not quietly relax any of that.
+    """
+    settings = load_settings()
+    v = settings.verification
+    assert isinstance(v.use_verifiers, bool)
+    # Whatever the switch is set to, the gates stay armed.
+    assert v.require_all_gates is True
+    assert "G1" in v.enabled_gates and "G1b" in v.enabled_gates
+    assert "G6" in v.enabled_gates
+
+
+def test_switching_verifiers_off_removes_both_providers():
+    """Both must go: leaving one wired would make `unanimous` mean "A alone"."""
+    from dataclasses import replace
+
+    from analyst_copilot.container import Corpus, build_pipeline
+    from analyst_copilot.retrieval.anchors import build_from_rows
+    from analyst_copilot.retrieval.bm25 import BM25Index
+
+    empty = Corpus(
+        bm25=BM25Index([]),
+        anchors=build_from_rows([]),
+        pages_by_doc={},
+        headers_by_page={},
+        coverage_years={},
+        n_pages=0,
+        n_docs=0,
+    )
+    settings = load_settings()
+    off = replace(
+        settings, verification=replace(settings.verification, use_verifiers=False)
+    )
+    pipeline = build_pipeline(off, corpus=empty, with_router_llm=False)
+    assert pipeline.verifier_a is None
+    assert pipeline.verifier_b is None

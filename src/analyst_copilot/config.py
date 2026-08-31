@@ -80,6 +80,13 @@ class VerificationSettings:
     abstain_string: str
     # Gate toggles exist so eval/ablate.py can disable exactly one gate and
     # measure its contribution (§24.3). Absent from config => all enabled.
+    # ⚠️ TURNING THIS OFF IS A SCORING DECISION, NOT A PERFORMANCE ONE.
+    # ✅ MEASURED on 25 stratified questions: gates-only answered 20/25 instead
+    # of 12/25 and scored +4 against +6, because the 8 extra answers were 3
+    # right and 5 wrong — 37% accuracy on exactly the questions verification
+    # blocks, below the 50% break-even where answering (2p-1) beats refusing.
+    # It is also ~20 s per question faster. Both are true; the trade is real.
+    use_verifiers: bool = True
     enabled_gates: tuple[str, ...] = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
 
 
@@ -103,6 +110,12 @@ class EvalSettings:
     gold_map_min_jaccard: float
     split_by: str
     report_by_answer_shape: bool
+    # Token prices for the eval spend report. DEFAULT None ON PURPOSE: tokens
+    # are measured exactly, dollars are only ever derived from a rate someone
+    # confirmed. A hardcoded guess would produce a confident budget number that
+    # is silently wrong, which is worse than no number at all.
+    price_per_mtok_input: float | None = None
+    price_per_mtok_output: float | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +139,13 @@ class Settings:
     azure_foundry_resource: str | None = None
     cohere_rerank_endpoint: str | None = None
     cohere_rerank_api_key: str | None = None
+    # AWS / Bedrock. Optional: botocore resolves the standard credential chain
+    # when these are absent, which is how a grader runs it on their own account.
+    aws_region: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_session_token: str | None = None
+    aws_profile: str | None = None
 
     def model(self, stage: str) -> ModelSettings:
         try:
@@ -261,6 +281,7 @@ def load_settings(
         verification=VerificationSettings(
             require_all_gates=v["require_all_gates"],
             verifier_policy=v["verifier_policy"],
+            use_verifiers=bool(v.get("use_verifiers", True)),
             independence=v["independence"],
             verifier_b_adversarial=v["verifier_b_adversarial"],
             abstain_string=v["abstain_string"],
@@ -285,6 +306,8 @@ def load_settings(
             gold_map_min_jaccard=ev["gold_map_min_jaccard"],
             split_by=ev["split_by"],
             report_by_answer_shape=ev.get("report_by_answer_shape", True),
+            price_per_mtok_input=(ev.get("pricing") or {}).get("input_per_mtok"),
+            price_per_mtok_output=(ev.get("pricing") or {}).get("output_per_mtok"),
         ),
         azure_openai_endpoint=(env.get("AZURE_OPENAI_ENDPOINT") or "").strip() or None,
         azure_openai_api_key=(env.get("AZURE_OPENAI_API_KEY") or "").strip() or None,
@@ -293,4 +316,9 @@ def load_settings(
         azure_foundry_resource=(env.get("AZURE_FOUNDRY_RESOURCE") or "").strip() or None,
         cohere_rerank_endpoint=(env.get("COHERE_RERANK_ENDPOINT") or "").strip() or None,
         cohere_rerank_api_key=(env.get("COHERE_RERANK_API_KEY") or "").strip() or None,
+        aws_region=(env.get("AWS_REGION") or "").strip() or None,
+        aws_access_key_id=(env.get("AWS_ACCESS_KEY_ID") or "").strip() or None,
+        aws_secret_access_key=(env.get("AWS_SECRET_ACCESS_KEY") or "").strip() or None,
+        aws_session_token=(env.get("AWS_SESSION_TOKEN") or "").strip() or None,
+        aws_profile=(env.get("AWS_PROFILE") or "").strip() or None,
     )

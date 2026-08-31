@@ -16,11 +16,12 @@ from pathlib import Path
 
 from .config import Settings, load_settings
 from .ingest.catalog import build_catalog
-from .llm.registry import get_provider
+from .llm.registry import get_embedder, get_provider
 from .query.formula_book import FormulaBook
 from .query.pipeline import QueryPipeline
 from .query.router import DocumentRouter, load_aliases
 from .retrieval.anchors import build_from_rows
+from .retrieval.dense import DenseRetriever
 from .retrieval.bm25 import BM25Index
 from .storage import repository as repo
 from .storage.db import connect
@@ -37,12 +38,22 @@ class Corpus:
     coverage_years: dict[str, list[int]]
     n_pages: int
     n_docs: int
+    # None when retrieval.use_dense is off, or when nothing is embedded.
+    dense: DenseRetriever | None = None
+    dense_coverage: int = 0
 
 
 def load_corpus(settings: Settings) -> Corpus:
     with connect(settings.database_url) as conn:
         rows = repo.pages_for_bm25(conn)
         catalog_rows = repo.load_catalog(conn)
+        # MD&A anchors to its whole section span, not its title page.
+        narrative_spans = repo.load_narrative_spans(conn)
+        embedded = (
+            repo.pages_with_embeddings(conn)
+            if settings.retrieval.use_dense
+            else []
+        )
 
     pages_by_doc: dict[str, dict[int, str]] = {}
     headers_by_page: dict[str, str] = {}
@@ -53,14 +64,24 @@ def load_corpus(settings: Settings) -> Corpus:
     coverage = {
         r["doc_id"]: list(r.get("coverage_years") or []) for r in catalog_rows
     }
+
+    # ⚠️ The embedder is constructed ONLY when dense is on. `get_embedder`
+    # validates the deployment, so building it unconditionally would make an
+    # unused embedding deployment a hard startup failure.
+    dense = None
+    if settings.retrieval.use_dense and embedded:
+        dense = DenseRetriever(embedded, get_embedder(settings))
+
     return Corpus(
         bm25=BM25Index(rows),
-        anchors=build_from_rows(rows),
+        anchors=build_from_rows(rows, narrative_spans),
         pages_by_doc=pages_by_doc,
         headers_by_page=headers_by_page,
         coverage_years=coverage,
         n_pages=len(rows),
         n_docs=len(pages_by_doc),
+        dense=dense,
+        dense_coverage=dense.coverage if dense else 0,
     )
 
 
@@ -99,9 +120,21 @@ def build_pipeline(
         headers_by_page=corpus.headers_by_page,
         coverage_years=corpus.coverage_years,
         extractor=get_provider(settings, "extractor"),
-        verifier_a=get_provider(settings, "verifier_a") if with_verifiers else None,
-        verifier_b=get_provider(settings, "verifier_b") if with_verifiers else None,
+        # `with_verifiers` is the ablation switch; `use_verifiers` is the
+        # deployed setting. Either being false means no LLM verification — the
+        # deterministic gates G1-G7 are unaffected and still run.
+        verifier_a=(
+            get_provider(settings, "verifier_a")
+            if with_verifiers and settings.verification.use_verifiers
+            else None
+        ),
+        verifier_b=(
+            get_provider(settings, "verifier_b")
+            if with_verifiers and settings.verification.use_verifiers
+            else None
+        ),
         formula_book=FormulaBook(),
         router_llm=get_provider(settings, "router") if with_router_llm else None,
         composer=get_provider(settings, "composer"),
+        dense=corpus.dense,
     )

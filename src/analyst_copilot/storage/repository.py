@@ -24,6 +24,24 @@ from psycopg.types.json import Jsonb
 
 PARSER_VERSION = "2026-08-31.1"
 
+# ⚠️ BULK INSERTS ARE BATCHED, AND THAT IS NOT A MICRO-OPTIMISATION.
+# ✅ MEASURED: re-ingesting the corpus died on JPMORGAN_2022_10K - the largest
+# filing - with `psycopg.OperationalError: the connection is lost`, after
+# `replace_document_content` had already deleted its rows. The filing was left
+# with ZERO pages and a half-finished status, i.e. a corpus that still reported
+# 78 filings while one of them had silently become unciteable.
+#
+# The cause is a single `executemany` carrying every row for a document: a large
+# 10-K yields tens of thousands of blocks and facts, and one statement that big
+# over a remote Azure connection is what breaks. Chunking keeps each round trip
+# bounded and turns a corpus-corrupting failure into a retryable one.
+_BATCH = 2_000
+
+
+def _executemany_batched(cur, sql: str, rows: Sequence[dict[str, Any]]) -> None:
+    for start in range(0, len(rows), _BATCH):
+        cur.executemany(sql, rows[start:start + _BATCH])
+
 
 # Id construction lives in one place for the whole system - see ids.py.
 from ..ids import block_id, cell_id, page_id, section_id, table_id  # noqa: F401,E402
@@ -103,12 +121,33 @@ def seed_company_aliases(conn: psycopg.Connection, aliases: dict[str, list[str]]
     """
     rows = [(slug, alias) for slug, values in aliases.items() for alias in values]
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """INSERT INTO company_aliases (company_slug, alias)
                VALUES (%s, %s) ON CONFLICT DO NOTHING""",
             rows,
         )
     return len(rows)
+
+
+def load_narrative_spans(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Page ranges of narrative sections, for span-based anchoring.
+
+    ⚠️ MD&A IS NOT A TWO-PAGE STATEMENT. A financial statement runs 2-3 pages, so
+    anchoring on "the page whose head carries the title, plus the next one"
+    covers it. Item 7 runs ~30 pages and only its TITLE page carries the title,
+    so that rule reached 5 pages of a 131-page filing - and the organic-growth
+    discussion the narrative questions turn on sits outside those 5.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT doc_id, kind, stmt_type, raw_title, page_start, page_end
+                 FROM sections
+                WHERE kind IN ('mdna', 'item', 'part')
+                  AND page_start IS NOT NULL
+                ORDER BY doc_id, page_start"""
+        )
+        return cur.fetchall()
 
 
 def load_catalog(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -163,7 +202,8 @@ def insert_pages(conn: psycopg.Connection, rows: Sequence[dict[str, Any]]) -> No
     if not rows:
         return
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """
             INSERT INTO pages (
                 page_id, doc_id, section_id, page_seq, page_printed,
@@ -192,7 +232,8 @@ def insert_blocks(conn: psycopg.Connection, rows: Sequence[dict[str, Any]]) -> N
     if not rows:
         return
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """
             INSERT INTO blocks (
                 block_id, page_id, doc_id, section_id, order_idx,
@@ -214,7 +255,8 @@ def insert_tables(conn: psycopg.Connection, rows: Sequence[dict[str, Any]]) -> N
     if not rows:
         return
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """
             INSERT INTO tables (
                 table_id, page_id, doc_id, section_id, order_idx, caption,
@@ -237,7 +279,8 @@ def insert_table_cells(conn: psycopg.Connection, rows: Sequence[dict[str, Any]])
     if not rows:
         return
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """
             INSERT INTO table_cells (
                 cell_id, table_id, row_idx, col_idx, row_header_path,
@@ -253,11 +296,58 @@ def insert_table_cells(conn: psycopg.Connection, rows: Sequence[dict[str, Any]])
         )
 
 
+def insert_facts(conn: psycopg.Connection, rows: Sequence[dict[str, Any]]) -> None:
+    """Inline XBRL facts - ingest step S8 (§17.2).
+
+    `dimensions` is JSONB, so it must be adapted with `Jsonb`; psycopg will not
+    infer it from a plain dict.
+
+    Note what is NOT indexed here: value. Facts are looked up by CONCEPT +
+    PERIOD, never by value (§17.3 rule 1) - a value-first search was measured
+    returning 468 coincidental matches for one concept, which is a -1 generator.
+    """
+    if not rows:
+        return
+    payload = [
+        {**r, "dimensions": Jsonb(r["dimensions"]) if r.get("dimensions") else None}
+        for r in rows
+    ]
+    with conn.cursor() as cur:
+        _executemany_batched(
+            cur,
+            """
+            INSERT INTO facts (
+                fact_id, doc_id, qname, value, unit, scale, sign,
+                period_start, period_end, is_instant, dimensions,
+                has_dimensions, row_label, page_id, block_id
+            ) VALUES (
+                %(fact_id)s, %(doc_id)s, %(qname)s, %(value)s, %(unit)s,
+                %(scale)s, %(sign)s, %(period_start)s, %(period_end)s,
+                %(is_instant)s, %(dimensions)s, %(has_dimensions)s,
+                %(row_label)s, %(page_id)s, %(block_id)s
+            )
+            ON CONFLICT (fact_id) DO UPDATE SET
+                value          = EXCLUDED.value,
+                unit           = EXCLUDED.unit,
+                scale          = EXCLUDED.scale,
+                sign           = EXCLUDED.sign,
+                period_start   = EXCLUDED.period_start,
+                period_end     = EXCLUDED.period_end,
+                is_instant     = EXCLUDED.is_instant,
+                dimensions     = EXCLUDED.dimensions,
+                has_dimensions = EXCLUDED.has_dimensions,
+                row_label      = EXCLUDED.row_label
+            """,
+            payload,
+        )
+
+
 def insert_sections(conn: psycopg.Connection, rows: Sequence[dict[str, Any]]) -> None:
     if not rows:
         return
     with conn.cursor() as cur:
-        cur.executemany(
+        _executemany_batched(
+            cur,
             """
             INSERT INTO sections (
                 section_id, doc_id, parent_id, level, ordinal, raw_title,
@@ -288,6 +378,37 @@ def page_text(conn: psycopg.Connection, pid: str) -> str | None:
         cur.execute("SELECT raw_text FROM pages WHERE page_id = %s", (pid,))
         row = cur.fetchone()
         return row["raw_text"] if row else None
+
+
+def pages_with_embeddings(
+    conn: psycopg.Connection, doc_ids: Iterable[str] | None = None
+) -> list[dict[str, Any]]:
+    """Pages that carry a vector, for the in-memory dense index.
+
+    ⚠️ `embedding IS NOT NULL` is part of the CONTRACT, not an optimisation.
+    A page with no vector must not be rankable at all - see DenseRetriever.
+    The vector is cast to text because the connection has no pgvector adapter
+    registered; `DenseRetriever._as_vector` parses either form.
+    """
+    with conn.cursor() as cur:
+        if doc_ids:
+            cur.execute(
+                """SELECT page_id, doc_id, page_seq, raw_text,
+                          embedding::text AS embedding
+                     FROM pages
+                    WHERE embedding IS NOT NULL AND doc_id = ANY(%s)
+                    ORDER BY doc_id, page_seq""",
+                (list(doc_ids),),
+            )
+        else:
+            cur.execute(
+                """SELECT page_id, doc_id, page_seq, raw_text,
+                          embedding::text AS embedding
+                     FROM pages
+                    WHERE embedding IS NOT NULL
+                    ORDER BY doc_id, page_seq"""
+            )
+        return cur.fetchall()
 
 
 def pages_for_bm25(

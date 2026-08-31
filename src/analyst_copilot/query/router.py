@@ -200,6 +200,71 @@ class DocumentRouter:
         )
 
 
+# ---------------------------------------------------------------------------
+# Intent - forward-looking vs historical (§14.4 stage 0b)
+# ---------------------------------------------------------------------------
+# ⚠️ WHY THIS IS DETERMINISTIC. Intent is ONE field - historical or forecast -
+# and it feeds exactly one thing: gate G3's exception allowing a question period
+# after the filing period ("What is Boeing forecasting for FY2023?" is answered
+# by the FY2022 10-K, because a 10-K discusses the year ahead).
+#
+# ✅ MEASURED: asking a model for it cost ~32 s per question - about 12% of
+# end-to-end latency - on a ~400-token prompt. IMPLEMENTATION_PLAN §14.4 always
+# allowed "cheap LLM, OR keyword prior"; at that price the keyword prior wins.
+#
+# ⚠️ THE FALSE FRIENDS ARE THE WHOLE DIFFICULTY. A 10-K is saturated with words
+# that look forward-looking and are not:
+#     "pension plan", "benefit plan", "stock plan"   -> `plan` is a NOUN
+#     "expected credit losses"                       -> an accounting measure
+#     "projected benefit obligation"                 -> an accounting measure
+#     "target" in "targeted restructuring"           -> descriptive
+# Matching those would push historical questions down the forecast path and
+# weaken G3, which exists to catch wrong-period evidence. So exclusions are
+# checked FIRST and the forecast markers are deliberately narrow.
+_FORECAST_EXCLUSIONS = re.compile(
+    r"\b(?:"
+    r"pension|benefit|retirement|savings|stock|incentive|compensation|401\s*\(?k\)?"
+    r"|healthcare|medical|dental|severance|restructuring"
+    r")\s+plans?\b"
+    r"|\bplan\s+(?:assets|participants|obligations?|amendments?)\b"
+    r"|\bexpected\s+(?:credit\s+loss|return\s+on|useful\s+li|to\s+be\s+collected)"
+    r"|\bprojected\s+benefit\s+obligation"
+    r"|\bplanned\s+maintenance\b",
+    re.I,
+)
+
+_FORECAST_MARKERS = re.compile(
+    r"\b(?:"
+    r"forecast(?:s|ing|ed)?"
+    r"|guidance"
+    r"|outlook"
+    r"|project(?:s|ing|ions?)\s+(?:for|to|that)"
+    r"|expect(?:s|ed|ing)?\s+(?:to|for|that|in\s+fy)"
+    r"|anticipat(?:es?|ed|ing)\s+(?:to|for|that)"
+    r"|going\s+forward"
+    r"|next\s+(?:year|fiscal\s+year|quarter)"
+    r"|(?:in|for)\s+the\s+(?:coming|upcoming|following)\s+(?:year|quarter)"
+    r"|future\s+(?:performance|growth|revenue|earnings|results)"
+    r")\b",
+    re.I,
+)
+
+
+def detect_intent(question: str) -> str:
+    """`historical` or `forecast`, with no model call.
+
+    Conservative by construction: a missed forecast costs one question, while a
+    false positive weakens G3's period check for every question it fires on.
+    """
+    text = question or ""
+    if _FORECAST_EXCLUSIONS.search(text):
+        # A forward-looking word inside an accounting term is not a forecast.
+        # Strip the phrase and re-test, so "what is the pension plan's expected
+        # return, and what does management forecast for FY2023" still resolves.
+        text = _FORECAST_EXCLUSIONS.sub(" ", text)
+    return "forecast" if _FORECAST_MARKERS.search(text) else "historical"
+
+
 def load_aliases(path) -> dict[str, list[str]]:
     """Load data/company_aliases.yaml.
 

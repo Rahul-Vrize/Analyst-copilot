@@ -89,6 +89,19 @@ class ParsedTable:
     alignment_ok: bool
     header_row_idx: int | None
     header_tokens: list[str] = field(default_factory=list)
+    # ⚠️ THE ROW LABEL IS THE SEARCHABLE PART OF A FINANCIAL TABLE, AND IT WAS
+    # NEVER INDEXED. `build_lexical_text`'s own docstring says the BM25 lift
+    # depends on strings like "Purchases of property, plant and equipment"
+    # surviving indexing - but only COLUMN headers were ever passed to it, and
+    # a column header is "2022", "2021", "$". The line item, which is what an
+    # analyst's question actually names, was dropped.
+    #
+    # Collected from the GRID, not from `cells`, so tables that fail the
+    # alignment gate still contribute their labels. That is not a weakening of
+    # fail-closed: the gate governs whether a typed FACT may exist; a row label
+    # in the lexical index creates no fact, it only makes the page findable,
+    # after which every gate and verifier applies unchanged.
+    row_labels: list[str] = field(default_factory=list)
     value_col_count: int = 0
     col_kinds: list[str] = field(default_factory=list)
     cells: list[TableCell] = field(default_factory=list)
@@ -434,6 +447,19 @@ def parse_table(
         n_cols=n_cols,
         reject_reason=None if validates else "alignment gate failed",
     )
+
+    body_start_all = (header_row_idx + 1) if header_row_idx is not None else 0
+    if label_col is not None:
+        seen: set[str] = set()
+        for r in range(body_start_all, len(grid)):
+            label = (grid[r][label_col] or "").strip()
+            # A label is a line item, not a sentence, and not a bare number.
+            if not (2 < len(label) <= 120) or label.lower() in seen:
+                continue
+            if not any(ch.isalpha() for ch in label):
+                continue
+            seen.add(label.lower())
+            table.row_labels.append(label)
 
     # Typed cells exist ONLY when alignment validates (step 6, fail closed).
     if not validates:

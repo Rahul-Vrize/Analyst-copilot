@@ -246,6 +246,144 @@ def units_compatible(operands: list[Operand]) -> bool:
     return len(units) <= 1
 
 
+def required_operand_names(formula: str) -> list[str]:
+    """The exact operand names `evaluate` will demand, period suffixes included.
+
+    ⚠️ THIS CLOSES A CONTRACT GAP THAT DISABLED THE WHOLE CALCULATOR.
+    ✅ MEASURED: `evaluate` resolves operands by EXACT name (`values[o.name]`),
+    but nothing ever told the extractor what those names are, so it invented its
+    own (`fy2019_revenue`, `capex_fy2018`). Every derived answer then died with
+    "operand 'revenue' is not available" -> gate G4 -> abstain. That is the
+    entire domain-relevant category plus most ratio questions, failing silently
+    as if the evidence were missing.
+
+    `avg(ppe_net, prev, current)` needs BOTH `ppe_net` and `ppe_net__prev`,
+    because `_Helpers._lookup` keys a non-current period as `name__period`.
+    """
+    try:
+        tree = ast.parse(formula.strip(), mode="eval")
+    except SyntaxError:
+        return []
+
+    required: list[str] = []
+    seen: set[str] = set()
+
+    def want(name: str) -> None:
+        if name not in seen:
+            seen.add(name)
+            required.append(name)
+
+    period_words: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id not in _HELPER_NAMES or not node.args:
+                continue
+            try:
+                base = _bare_name(node.args[0])
+            except FormulaError:
+                continue
+            periods = [
+                a.id if isinstance(a, ast.Name) else
+                (a.value if isinstance(a, ast.Constant) else None)
+                for a in node.args[1:]
+            ]
+            periods = [p for p in periods if isinstance(p, str)]
+            # `prev(x)` names no period explicitly and means the prior one.
+            if node.func.id == "prev" and not periods:
+                periods = ["prev"]
+            period_words.update(periods)
+            want(base)
+            for period in periods:
+                if period != "current":
+                    want(f"{base}__{period}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id not in _HELPER_NAMES:
+            if node.id not in period_words and node.id not in {"current", "prev", "n"}:
+                want(node.id)
+    return required
+
+
+_YEARish = re.compile(r"(?:fy)?\s*(?:19|20)\d{2}", re.I)
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _canonical(name: str) -> str:
+    """Strip period decoration so `fy2019_revenue` and `revenue` compare equal."""
+    text = _YEARish.sub(" ", (name or "").lower())
+    return _NON_ALNUM.sub(" ", text).strip()
+
+
+def _period_key(operand: Operand) -> int:
+    """Sort key: later period first. Undated operands sort last."""
+    match = _YEARish.search(operand.period or "")
+    if match:
+        digits = re.sub(r"\D", "", match.group(0))
+        if len(digits) == 4:
+            return -int(digits)
+    return 1
+
+
+def align_operands(operands: list[Operand], required: list[str]) -> list[Operand]:
+    """Rename extractor slots onto the names the formula demands.
+
+    The prompt now asks for these names directly, so this is the SAFETY NET, not
+    the mechanism - a model that returns `total_revenue` or `revenue_fy2019`
+    still resolves. Matching is on the canonical name (period decoration
+    stripped), then by period, latest first: `x` takes the most recent period and
+    `x__prev` the one before it.
+
+    Anything that does not match is passed through UNCHANGED rather than guessed
+    at. A mis-assigned operand computes a plausible wrong number, which is the
+    -1 this whole system exists to avoid; leaving it unresolved fails G4 loudly.
+    """
+    if not required:
+        return operands
+
+    by_canonical: dict[str, list[Operand]] = {}
+    for operand in operands:
+        by_canonical.setdefault(_canonical(operand.name), []).append(operand)
+    for group in by_canonical.values():
+        group.sort(key=_period_key)
+
+    claimed: set[int] = set()
+    renamed: list[Operand] = []
+    # Current-period names first, so they take the latest period before a
+    # `__prev` sibling can claim it.
+    for name in sorted(required, key=lambda n: n.endswith("__prev")):
+        base, _, suffix = name.partition("__")
+        wanted = _canonical(base)
+        index = 1 if suffix else 0
+        candidates = (
+            by_canonical.get(wanted)
+            # A looser fallback: the formula's word appears inside the slot name.
+            or next(
+                (g for key, g in by_canonical.items()
+                 if wanted and (wanted in key or key in wanted)),
+                None,
+            )
+        )
+        if not candidates or index >= len(candidates):
+            continue
+        chosen = candidates[index]
+        if id(chosen) in claimed:
+            continue
+        claimed.add(id(chosen))
+        renamed.append(
+            Operand(
+                name=name,
+                value=chosen.value,
+                unit=chosen.unit,
+                scale=chosen.scale,
+                period=chosen.period,
+                citation=chosen.citation,
+            )
+        )
+
+    untouched = [o for o in operands if id(o) not in claimed]
+    return renamed + untouched
+
+
 def compute(
     formula: str,
     operands: list[Operand],
@@ -278,17 +416,49 @@ def recomputes(stated: str, computation: Computation, tolerance: Decimal) -> boo
 
     This catches the case where the model computed correctly, then wrote a
     different number into its prose.
+
+    ⚠️ TWO DEFECTS THIS GATE HAD, BOTH OF WHICH REJECTED CORRECT ANSWERS.
+
+    1. IT COMPARED A ROUNDED CLAIM TO AN UNROUNDED RESULT. The answer states
+       what `Computation.rendered()` produced - quantized to `dp` - while this
+       compared against the raw quotient at 1e-6 relative. ✅ MEASURED: fixed
+       asset turnover computed 24.2579..., rendered "24.26", and G6 rejected it
+       at 8.6e-5. The question then abstained on an answer that matched gold
+       (24.26) exactly. Every rounded metric in the book failed this way.
+
+    2. IT READ ONLY THE FIRST NUMBER, so a prose answer naming its period first
+       ("the FY2019 ratio is 24.26") was checked against 2019 - the same defect
+       already fixed in the eval scorer.
+
+    The gate still does its real job: a model that computes 24.26 and writes 27
+    is rejected.
     """
-    m = _NUM.search(stated or "")
-    if not m:
+    candidates: list[Decimal] = []
+    for match in _NUM.finditer(stated or ""):
+        try:
+            candidates.append(Decimal(match.group(0).replace(",", "")))
+        except InvalidOperation:
+            continue
+    if not candidates:
         return False
-    try:
-        claimed = Decimal(m.group(0).replace(",", ""))
-    except InvalidOperation:
-        return False
+
     actual = computation.result
     if computation.render == "percent":
         actual = actual * 100
-    if actual == 0:
-        return abs(claimed) <= tolerance
-    return abs(actual - claimed) / abs(actual) <= tolerance
+
+    # The answer may state the exact value OR the value at its declared display
+    # precision. Both are the same claim.
+    accepted = [actual]
+    if computation.dp is not None:
+        accepted.append(
+            actual.quantize(Decimal(1).scaleb(-computation.dp), rounding=ROUND_HALF_UP)
+        )
+
+    for target in accepted:
+        for claimed in candidates:
+            if target == 0:
+                if abs(claimed) <= tolerance:
+                    return True
+            elif abs(target - claimed) / abs(target) <= tolerance:
+                return True
+    return False
