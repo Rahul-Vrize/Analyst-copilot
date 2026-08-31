@@ -212,9 +212,53 @@ streamlit run app_streamlit.py                      # UI on :8501
 
 ## How a question is answered
 
+```mermaid
+flowchart TD
+    Q["Analyst question<br/><i>no document is chosen by the user</i>"] --> R
+
+    R{{"ROUTE<br/>deterministic scorer, no LLM<br/>alias · fiscal year · form · 8-K date"}}
+    R -- "no company named" --> CLR["Ask a clarifying question<br/><i>a wrong document is −1, asking is free</i>"]
+    R -- "top-4 candidate filings<br/>(gold filing present 98.5%)" --> RET
+
+    subgraph RET["RETRIEVE — three signals, each scoped to those 4 filings"]
+        direction LR
+        A["Structure anchors<br/>7 regexes · 75.6%"]
+        B["BM25<br/>lexical field · 59.8%"]
+        D["Dense<br/>cosine in memory · 74.8%"]
+    end
+
+    RET --> F["FUSE — Reciprocal Rank Fusion<br/>neighbour expand · rerank · 42k token budget<br/><b>88.2% gold-page recall</b>"]
+    F --> X["EXTRACT — evidence slots, never prose<br/>value · unit · period · page · <b>verbatim quote</b>"]
+    X --> C["COMPUTE — Python Decimal over a<br/>whitelisted AST. The model never does arithmetic"]
+    C --> G
+
+    G{{"GATES G1–G7 — deterministic, model-independent<br/>G1 quote is verbatim on the cited page<br/>G1b the figure is inside its own quote<br/>G6 the arithmetic recomputes"}}
+    G -- "all pass" --> V
+    G -- "any fail" --> ESC
+
+    V{{"VERIFY — two isolated LLM reviewers<br/><i>OFF in the shipped config</i>"}}
+    V -- "accepted" --> ANS["<b>Answer + document + page + quote</b><br/>+1"]
+    V -- "rejected" --> ESC
+
+    ESC{"Tier 1<br/>already tried?"}
+    ESC -- "no — retry DEEPER in the same 4 filings" --> RET
+    ESC -- "yes" --> NF["<b>Not found in this filing.</b><br/>0 — never a guess"]
+
+    style ANS fill:#1b5e20,stroke:#66bb6a,color:#fff
+    style NF fill:#4a3800,stroke:#d3a03c,color:#fff
+    style CLR fill:#0d2740,stroke:#5b9dff,color:#fff
+    style G fill:#12263a,stroke:#5b9dff,color:#fff
+    style R fill:#12263a,stroke:#5b9dff,color:#fff
+```
+
 ```
 route → navigate → RETRIEVE → extract → COMPUTE → verify → ANSWER
 ```
+
+**Escalation is by DEPTH, not breadth.** A failed attempt retries deeper inside
+the *same* four candidate filings rather than widening the document set —
+measured, the gold filing is in router top-4 for 134/136 questions and in top-8
+for the same 134, so widening buys nothing.
 
 One spine, switchable stages. **Control flow lives in code**: this is a
 deterministic workflow, not an agent. The model chooses *content* — which
