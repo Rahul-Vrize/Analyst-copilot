@@ -89,14 +89,20 @@ retrieval:
   neighbour_expand: 1           # ±1 page in tier 1, ±2 when escalated
   use_reranker: true            # ablation flag — false isolates the reranker's lift
 
-  # ⚠️ FALSE BECAUSE IT IS NOT BUILT, NOT BECAUSE IT IS SWITCHED OFF.
-  # There is no dense retriever: `pipeline._retrieve` builds its rankings from
-  # anchors + BM25 only, and `pages.embedding` is NULL for all 8,389 pages.
-  # Leaving this `true` advertised a stage that could not run, and would have
-  # made eval/ablate.py's `use_dense=False` variant measure a difference of
-  # exactly zero while appearing to prove the stage was worthless.
-  # Anchors + BM25 alone measure 80.3% gold-page recall at router top-4, so this
-  # is a refinement, not a gap in the accuracy core.
+  # ⚠️ THIS COMMENT USED TO SAY "FALSE BECAUSE IT IS NOT BUILT". It is built now.
+  # `retrieval/dense.py` holds the page vectors in memory and `_retrieve` fuses
+  # them as a THIRD RRF ranking, always scoped to the routed candidates.
+  #
+  # ✅ MEASURED, 127 questions with a mapped gold page:
+  #     dense@20 alone, oracle doc ............ 74.8% from 19.9 pages
+  #     anchors + BM25, router top-4 .......... 85.0%
+  #     anchors + BM25 + dense, router top-4 .. 88.2%   <- tier 1 now equals
+  #     escalated BM25@40, router top-4 ....... 88.2%      what tier 2 reached,
+  #                                                        from 87 pages not 119
+  #
+  # Setting this false is a real ablation now, not a no-op. It also degrades
+  # safely on its own: with `pages.embedding` unpopulated the index is empty and
+  # the stack falls back to anchors + BM25 rather than erroring.
   use_dense: true
 
 # ─────────────────────────────────────────────────────────────────────────────

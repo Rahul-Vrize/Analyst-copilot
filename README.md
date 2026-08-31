@@ -33,15 +33,22 @@ The design follows from measurement. The headline finding:
 **retrieval in filings is NAVIGATION, not similarity search.** Structure beats
 lexical search by 3×.
 
-| Measured on the real corpus (127 questions with a mapped gold page) | |
-|---|---|
-| Corpus-wide BM25, gold page in top-10 | 5.6% |
-| Structure anchors alone (7 regexes, no LLM) | **75.6%** |
-| BM25@20 alone, oracle document | 59.8% |
-| Anchors + BM25@20, oracle document | **85.8%** |
-| **Anchors + BM25@20, real router at top-4** (what actually runs) | **84.3%** |
-| Escalated BM25@40 at router top-4 | 87.4% |
-| Deterministic document router | **top-1 95.6% / top-4 98.5%** |
+| Measured on the real corpus (127 questions with a mapped gold page) | recall | pages |
+|---|---|---|
+| Corpus-wide BM25, gold page in top-10 | 5.6% | |
+| Structure anchors alone (7 regexes, no LLM) | **75.6%** | 26.6 |
+| Dense@20 alone, oracle document | 74.8% | 19.9 |
+| BM25@20 alone, oracle document | 59.8% | 19.8 |
+| Anchors + BM25@20, oracle document | 86.6% | 40.1 |
+| Anchors + BM25 + dense, oracle document | **91.3%** | 49.6 |
+| **Anchors + BM25 + dense, real router at top-4** (what actually runs) | **88.2%** | 86.8 |
+| Escalated BM25@40 at router top-4 (tier 2) | 88.2% | 119.2 |
+| Deterministic document router | **top-1 95.6% / top-4 98.5%** | |
+
+Three signals, no one of which is sufficient: anchors and dense are each worth
+~75% alone and BM25 only 60%, but fusing all three reaches 88.2% at router
+top-4 — which is what the *escalated* second tier used to reach, from 87 pages
+instead of 119. Tier 1 now does tier 2's job.
 
 Reproduce the whole table with `python scripts/measure_retrieval.py` — it reads
 the live database and makes no model calls.
@@ -58,12 +65,15 @@ the live database and makes no model calls.
 | Parsing | **lxml** | ⚠️ anchors *must* be extracted with a DOM walk — a regex probe reported Microsoft as having 0 anchors; it has 33, because the `<a>` wraps 200+ characters of nested `<span>` |
 | Lexical retrieval | **rank-bm25**, in memory | Azure Postgres has no BM25 extension (`pg_search`/ParadeDB absent; `ts_rank_cd` is not BM25) |
 | Structural retrieval | 7 regexes over statement titles | 75.6% gold-page recall with no model and no embedding |
+| Dense retrieval | **pgvector** storage, `text-embedding-3-small` (1024-d), cosine **in memory** | 8,389 × 1024 float32 is ~34 MB, so a resident matrix beats a Postgres round-trip per question and matches how BM25 and anchors already work |
+| Fusion | **Reciprocal Rank Fusion** over all three rankings | no signal is allowed to veto another; a dead embedder returns `[]` and the other two still answer |
 | Models | **Azure AI Foundry — gpt-5-mini** | extractor, composer, two verifiers |
 | Arithmetic | Python **`Decimal`** over an AST-whitelisted expression | the model never does arithmetic |
 | Frontend | **Next.js 16 / React 19**, TypeScript | one repo, one link |
 
-**Deliberately not used:** no vector database, no LangChain/LlamaIndex, no agent
-framework. Control flow is ordinary Python — see *How a question is answered*.
+**Deliberately not used:** no *separate* vector database (pgvector lives in the
+same Postgres), no LangChain/LlamaIndex, no agent framework. Control flow is
+ordinary Python — see *How a question is answered*.
 
 ---
 
@@ -130,6 +140,20 @@ python scripts/ingest_all.py                        # 78 filings in ~12 min
 
 Each filing gets its own connection with one retry — a single connection does
 not survive 78 filings against Azure Postgres.
+
+**Embeddings.** `retrieval.use_dense: true` needs `pages.embedding` populated;
+without it `DenseRetriever` indexes nothing and the system degrades to anchors
++ BM25 (85.0% instead of 88.2% at router top-4) rather than failing. To copy
+them from a database that already has them:
+
+```bash
+python scripts/import_embeddings.py --from <other_database_name>
+```
+
+⚠️ It re-embeds a sample of the source text with **our** embedder and aborts
+below cosine 0.98. Vectors from a different embedding model are not merely
+worse — they are meaningless against a query embedded by ours, and `<=>` would
+happily return the nearest of them.
 
 ### 5. Run
 
@@ -200,8 +224,9 @@ evidence, which formula — never *what happens next*.
    alias, fiscal year, form type and 8-K event date. Top-4 candidates. If no
    company is named it asks a clarifying question rather than guessing, because
    a wrong document is −1 and a clarification is free.
-2. **Retrieve** — structure anchors (financial-statement titles) ∪ in-memory
-   BM25 over a composite lexical field, allocated **per candidate filing**.
+2. **Retrieve** — three rankings, each scoped to the routed candidates and
+   never corpus-wide: structure anchors (financial-statement titles), in-memory
+   BM25 over a composite lexical field, and dense cosine over page embeddings.
    Narrative sections anchor to their whole span, not their title page: MD&A
    runs ~30 pages and names itself once.
 3. **Assemble** — neighbour expansion, RRF, optional Cohere rerank, then trim
@@ -240,7 +265,7 @@ the verifiers.
 ## Testing
 
 ```bash
-pytest                                            # 427 tests, no network required
+pytest                                            # 442 tests, no network required
 python scripts/preflight.py                       # dependencies reachable from here
 python scripts/measure_retrieval.py               # reproduces the recall table above
 python scripts/run_batches.py --sample 25         # rubric score on a stratified sample
