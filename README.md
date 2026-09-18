@@ -203,8 +203,9 @@ streamlit run app_streamlit.py                      # UI on :8501
 * **"How this was answered"** — the pipeline in plain language: which filings
   were considered, how many pages were read, which checks passed, and, when a
   reviewer rejects a draft, *its stated reason*. Raw JSON is one toggle deeper.
-* **Expect 60–130 s per question.** That is 5 sequential model calls over
-  ~40,000 tokens of filing text, not a hang. There is deliberately **no
+* **Expect ~55 s per question** (median on the full practice set; range
+  30–140 s). That is 5 sequential model calls over ~40,000 tokens of filing
+  text — about 80 pages of dense prose — not a hang. There is deliberately **no
   client-side timeout**: aborting a slow question would render identically to
   the system declining, and telling those two apart is the whole product.
 
@@ -364,24 +365,45 @@ single link, and a grader runs both from the same clone.
 * **The 136 practice questions are test data, not the specification.** Nothing
   is tuned to them; judges may ask different questions over unseen filings.
   100% accuracy is explicitly not the target.
-* **The system over-abstains, and that is the largest remaining loss.** On the
-  full practice set it declined on 90 of 129 questions — and replaying
-  retrieval offline shows **62 of those 90 had the gold page in the context it
-  read**. It is refusing questions it could answer, not questions the corpus
-  cannot support. The largest single cause was verifiers rejecting correct
-  answers over units and fiscal-year labels that live in a table *header*
-  rather than in the quoted *row*; verifiers now receive the full cited page,
-  which recovered 14 questions at a cost of 4.
+* **Measured on the full practice set (129 scored questions), shipped config:**
+
+  | | count | |
+  |---|---|---|
+  | correct answer **and** correct page | **57** | +1 each |
+  | declined, or right answer on the wrong page | 28 | 0 |
+  | confidently wrong | **44** | −1 each |
+  | **net** | **+13** | mean +0.101 |
+
+  Accuracy, three ways: **59.3%** correct when it answers (64/108), **49.6%**
+  correct over all questions, **44.2%** earning full rubric credit. Given a
+  correct answer it cites the right page **89.1%** of the time, so only 7
+  questions were "right answer, wrong location". Median latency **55 s**.
+
+* **The failure mode is now over-CONFIDENCE, not over-abstention.** It declines
+  on 21 of 129; replaying retrieval offline shows 14 of those 21 had the gold
+  page in the context it read, so the false-negative rate is 10.9% of all
+  questions. Earlier, with LLM verification on, it declined on 90 of 129 with
+  62 false negatives — the verifier fix and the retrieval work moved the
+  bottleneck from refusing to guessing.
+
+* **The damage is concentrated in two answer shapes.** `numeric` **+0.45**
+  (34 of 51 correct) and `phrase` **+0.38** carry the score; `yes_no` **−0.20**
+  and `multi_sentence` **−0.50** are net negative and contribute 29 of the 44
+  errors. A question like "does X have an improving Y profile" needs two
+  periods and a judgement, and the pipeline tends to answer it with one figure.
+
 * **LLM verification is OFF in the shipped config, and the trade is measured.**
   `verification.use_verifiers: false`. On 25 stratified questions:
 
-  | | answered | +1 | −1 | net | accuracy | median |
-  |---|---|---|---|---|---|---|
-  | verifiers on | 12/25 | 9 | 3 | **+6** | 75% | 61 s |
-  | verifiers off (shipped) | 20/25 | 12 | **8** | +4 | 60% | **41 s** |
+  | | answered | +1 | −1 | net | median |
+  |---|---|---|---|---|---|
+  | verifiers on | 39/129 | 26 | 12 | **+14** | 88 s |
+  | verifiers off (shipped) | 108/129 | **57** | **44** | **+13** | **55 s** |
 
-  Gates-only answers 8 more questions and gets 5 of them wrong, so it scores
-  ~2 points lower on this sample and runs ~20 s faster per question. The brief
+  **The same net score by opposite routes.** Verification converted wrong
+  answers into refusals almost one-for-one with the correct answers it also
+  blocked, so it was buying nothing on net — while costing 37% latency and
+  two-thirds of the questions answered. The brief
   requires an answer with its location or an honest decline; it does not
   require a verifier. **The deterministic gates G1–G7 are unaffected** — a
   quote must still appear verbatim on its cited page, the figure must appear
