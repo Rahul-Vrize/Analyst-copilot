@@ -163,8 +163,21 @@ verification:
   # ⚠️ When B is a genuine second family, set adversarial: false — refutation
   # framing is a SUBSTITUTE for independence, not an addition to it. Running both
   # over-abstains. Re-calibrate thresholds after any such switch.
-  independence: different_family   # ✅ ACHIEVED: verifier_b is Amazon Nova Pro
-                                   # on Bedrock; the extractor is gpt-5-mini.
+  # ⚠️ THIS SAID `different_family` AND CLAIMED "✅ ACHIEVED: verifier_b is
+  # Amazon Nova Pro on Bedrock". IT IS NOT. `VERIFIER_B_DEPLOYMENT` resolves to
+  # gpt-5-mini, so both verifiers are the same model and independence comes from
+  # ADVERSARIAL FRAMING plus context isolation — not architecture.
+  #
+  # ✅ WHY NOVA WAS REVERTED, MEASURED: a genuine second family was tried and was
+  # WORSE. Nova Pro as verifier B gave a 60% false-answer rate on the first
+  # batch, twice, with and without adversarial framing. A 17-case bake-off put
+  # it at 3/7 wrong answers caught but only 4/10 correct answers KEPT, against
+  # gpt-5-mini's 2/7 and 8/10. Llama 3.3 70B errored on 16 of 17.
+  #
+  # The conclusion is the useful part: INDEPENDENCE AND COMPETENCE ARE SEPARATE
+  # AXES. A second family buys independence and is worthless if it cannot judge.
+  # The swap path stays three lines in `.env` — see VERIFIER_B_PROVIDER.
+  independence: same_model_adversarial
   # ⚠️ TRUE, AND THE PLAN'S OWN ADVICE TO TURN IT OFF IS WRONG FOR THIS SYSTEM.
   # IMPLEMENTATION_PLAN says "when B is a genuine second family, set adversarial:
   # false - running both over-abstains". We now HAVE a genuine second family
